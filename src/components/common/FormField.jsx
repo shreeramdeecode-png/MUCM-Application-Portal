@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2, Download, FileStack } from 'lucide-react'
 import { countries } from '../../data/countries.js'
+import { countryCallingCodes } from '../../data/countryCallingCodes.js'
 import { formatAcceptLabels } from '../../utils/fileFieldMeta.js'
 import { normalizeSelectOptions } from '../../utils/formVisibility.js'
 import DateInput from './DateInput.jsx'
@@ -13,6 +14,30 @@ function sanitizePhoneInput(raw) {
   return cleaned.trimStart().startsWith('+')
     ? `+${plusNormalized}`
     : plusNormalized
+}
+
+const PHONE_COUNTRY_CODES = countryCallingCodes.map((item) => ({
+  key: `${item.code}-${item.dialCode}`,
+  value: item.dialCode,
+  label: `${item.name} (${item.dialCode})`,
+}))
+
+function splitPhoneValue(raw) {
+  const value = sanitizePhoneInput(raw ?? '')
+  const match = value.match(/^\+(\d{1,4})(?:[\s-]*)?(.*)$/)
+  if (!match) {
+    return { countryCode: '+1', localNumber: value }
+  }
+  const fullCode = `+${match[1]}`
+  const knownCode = PHONE_COUNTRY_CODES.some((item) => item.value === fullCode) ? fullCode : '+1'
+  const localNumber = knownCode === fullCode ? match[2] : value.replace(/^\+\d{1,4}\s*/, '')
+  return { countryCode: knownCode, localNumber }
+}
+
+function buildPhoneValue(countryCode, localNumber) {
+  const safeCode = String(countryCode || '+1').trim() || '+1'
+  const safeLocal = sanitizePhoneInput(localNumber ?? '').replace(/^\+/, '').trim()
+  return safeLocal ? `${safeCode} ${safeLocal}` : ''
 }
 
 function RadioOptionDescription({ text }) {
@@ -49,12 +74,8 @@ function CountryCombobox({
   const { name, label, required, helper, placeholder } = field
   const wrapperRef = useRef(null)
   const [isOpen, setIsOpen] = useState(false)
-  const [query, setQuery] = useState(value ?? '')
+  const [query, setQuery] = useState(() => value ?? '')
   const [activeIndex, setActiveIndex] = useState(-1)
-
-  useEffect(() => {
-    setQuery(value ?? '')
-  }, [value])
 
   useEffect(() => {
     function handleOutsideClick(event) {
@@ -297,7 +318,15 @@ function RepeatableBlock({ field, value, onChange, errors, onUploadActivityChang
   )
 }
 
-function FormField({ field, value, onChange, error, onUploadActivityChange, allValues = {} }) {
+function FormField({
+  field,
+  value,
+  onChange,
+  error,
+  onUploadActivityChange,
+  onFileUpload,
+  allValues = {},
+}) {
   const {
     name,
     label,
@@ -580,6 +609,7 @@ function FormField({ field, value, onChange, error, onUploadActivityChange, allV
           formatsLine={`Accepted formats: ${formatsText}. Maximum file size: ${maxFileSizeMB} MB.`}
           helperText={helper}
           onChange={(next) => onChange(name, next)}
+          onUploadFile={onFileUpload ? (file) => onFileUpload(name, file, field) : undefined}
           onUploadActivityChange={onUploadActivityChange}
           storeAsDataUrl={Boolean(field.storeAsDataUrl)}
           compact={Boolean(field.compact)}
@@ -614,6 +644,46 @@ function FormField({ field, value, onChange, error, onUploadActivityChange, allV
           placeholder={placeholder}
           onChange={(event) => onChange(name, event.target.value)}
         />
+        {helper ? (
+          <small className="mt-1 block text-sm text-muted-foreground">{helper}</small>
+        ) : null}
+        {error ? (
+          <small className="mt-1 block text-xs font-medium text-destructive">{error}</small>
+        ) : null}
+      </label>
+    )
+  }
+
+  if (type === 'tel') {
+    const { countryCode, localNumber } = splitPhoneValue(value)
+    return (
+      <label className="flex flex-col justify-start">
+        <span className={`${labelClasses} leading-5`}>
+          {label} {required ? <span className="text-red-500">*</span> : null}
+        </span>
+        <div className="mt-2 grid grid-cols-[minmax(128px,42%)_minmax(0,1fr)] items-start gap-2">
+          <select
+            className={`${inputClasses} mt-0 min-w-0 ${error ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+            value={countryCode}
+            onChange={(event) => onChange(name, buildPhoneValue(event.target.value, localNumber))}
+            aria-label={`${label} country code`}
+          >
+            {PHONE_COUNTRY_CODES.map((option) => (
+              <option key={option.key} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <input
+            className={`${inputClasses} mt-0 min-w-0 ${error ? 'border-destructive focus-visible:ring-destructive' : ''}`}
+            type="tel"
+            value={localNumber}
+            required={required}
+            placeholder={placeholder ?? 'Phone number'}
+            inputMode="numeric"
+            onChange={(event) => onChange(name, buildPhoneValue(countryCode, event.target.value))}
+          />
+        </div>
         {helper ? (
           <small className="mt-1 block text-sm text-muted-foreground">{helper}</small>
         ) : null}
@@ -742,9 +812,7 @@ function FormField({ field, value, onChange, error, onUploadActivityChange, allV
         required={required}
         placeholder={placeholder}
         inputMode={type === 'tel' ? 'numeric' : undefined}
-        onChange={(event) =>
-          onChange(name, type === 'tel' ? sanitizePhoneInput(event.target.value) : event.target.value)
-        }
+        onChange={(event) => onChange(name, event.target.value)}
       />
       {helper ? (
         <small className="mt-1 block text-sm text-muted-foreground">{helper}</small>
