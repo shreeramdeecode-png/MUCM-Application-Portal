@@ -11,7 +11,7 @@ function getInitials(email) {
   return local.slice(0, 2).toUpperCase()
 }
 
-function ProfileDropdown({ email, onLogout, darkAvatar = true }) {
+function ProfileDropdown({ email, onLogout, onBackToChecklist = null, darkAvatar = true }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
   const navigate = useNavigate()
@@ -62,6 +62,21 @@ function ProfileDropdown({ email, onLogout, darkAvatar = true }) {
 
           {/* Menu items */}
           <div className="py-1.5">
+            {onBackToChecklist ? (
+              <button
+                type="button"
+                onClick={() => { setOpen(false); onBackToChecklist() }}
+                className="flex w-full items-center gap-3 px-4 py-2.5 text-sm text-[#0A1628]/80 transition hover:bg-[#F8F7F4] hover:text-[#0A1628]"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#0A1628]/6 text-[#0A1628]/60">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M10.125 19.5 3 12m0 0 7.125-7.5M3 12h18" />
+                  </svg>
+                </span>
+                Back to Checklist
+              </button>
+            ) : null}
+
             <button
               type="button"
               onClick={() => { setOpen(false); navigate('/profile') }}

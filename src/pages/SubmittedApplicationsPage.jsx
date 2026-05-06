@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import StepSidebar from '../components/application/StepSidebar.jsx'
 import ProfileDropdown from '../components/common/ProfileDropdown.jsx'
 import PrimaryButton from '../components/common/PrimaryButton.jsx'
+import { apiUrl } from '../config/baseUrl.js'
 import { applicationSteps } from '../data/applicationSteps.js'
 import { isFieldVisible } from '../utils/formVisibility.js'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
@@ -10,6 +11,30 @@ import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
 const SUBMISSIONS_KEY = 'mucm-submitted-applications'
+const BACKEND_DOCUMENT_LABELS = {
+  passport: 'Passport',
+  bank_statement: 'Bank Statement (Minimum 3 Months)',
+  premedical_Bachelor_ug_HSC_Certificate: 'Premedical / Bachelor / Undergraduate / 12th Grade Transcript',
+  Secondary_11grade: '11th Grade Transcript',
+  cv_resume: 'CV / Resume',
+  passport_photo: 'Passport-Size Photograph',
+  other_professional_transcripts: 'Other professional transcripts / certifications / awards',
+  exam_results_marksheet: 'Exam Results Marksheet (MCAT / NEET / UCAT)',
+  sponsor_signed_financial_form: 'Upload signed sponsor form',
+  review_signature_document: 'Review Signature Document',
+}
+const BACKEND_DOCUMENT_ORDER = [
+  'passport',
+  'bank_statement',
+  'premedical_Bachelor_ug_HSC_Certificate',
+  'Secondary_11grade',
+  'cv_resume',
+  'passport_photo',
+  'other_professional_transcripts',
+  'exam_results_marksheet',
+  'sponsor_signed_financial_form',
+  'review_signature_document',
+]
 
 function SubmissionAnswers({ formValues }) {
   const stepsWithFields = useMemo(() => {
@@ -126,13 +151,15 @@ function SubmissionAnswers({ formValues }) {
 function SubmittedApplicationsPage() {
   const navigate = useNavigate()
   const [activeModule, setActiveModule] = useState('Submitted Applications')
-  const userEmail = (() => {
+  const authSession = (() => {
     try {
-      return JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}').email ?? ''
+      return JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
     } catch {
-      return ''
+      return {}
     }
   })()
+  const userEmail = authSession?.email ?? ''
+  const authToken = String(authSession?.token ?? '').trim()
 
   const submissions = useMemo(() => {
     try {
@@ -146,6 +173,94 @@ function SubmittedApplicationsPage() {
 
   const [selectedSubmissionId, setSelectedSubmissionId] = useState(submissions[0]?.id ?? '')
   const selectedSubmission = submissions.find((item) => item.id === selectedSubmissionId) ?? submissions[0] ?? null
+  const [apiDocuments, setApiDocuments] = useState([])
+  const [apiDocumentsLoading, setApiDocumentsLoading] = useState(false)
+  const [apiDocumentsError, setApiDocumentsError] = useState('')
+
+  function getAuthHeader() {
+    return authToken ? { Authorization: `Bearer ${authToken}` } : {}
+  }
+
+  function buildApplicationsPaths() {
+    return ['/api/v1/applications', '/api/applications', '/applications', '/application']
+  }
+
+  useEffect(() => {
+    const applicationId = String(selectedSubmission?.id || '').trim()
+    if (!applicationId) {
+      setApiDocuments([])
+      setApiDocumentsError('')
+      return
+    }
+
+    let cancelled = false
+    setApiDocumentsLoading(true)
+    setApiDocumentsError('')
+
+    ;(async () => {
+      let lastError = null
+      for (const basePath of buildApplicationsPaths()) {
+        const endpoint = `${basePath}/by-application-id/${encodeURIComponent(applicationId)}/document`
+        try {
+          const response = await fetch(apiUrl(endpoint), {
+            headers: {
+              ...getAuthHeader(),
+            },
+          })
+          const data = await response.json().catch(() => ({}))
+          if (response.ok && data.success !== false) {
+            const files = data?.data?.files || {}
+            const keys = [
+              ...BACKEND_DOCUMENT_ORDER.filter((key) => Object.prototype.hasOwnProperty.call(files, key)),
+              ...Object.keys(files).filter((key) => !BACKEND_DOCUMENT_ORDER.includes(key)),
+            ]
+            const requiredByBackendKey = {
+              passport: true,
+              bank_statement: true,
+              premedical_Bachelor_ug_HSC_Certificate: true,
+              Secondary_11grade: true,
+              cv_resume: true,
+              passport_photo: true,
+            }
+            const mapped = keys.map((key) => {
+              const entry = files[key] || {}
+              return {
+                key,
+                label: BACKEND_DOCUMENT_LABELS[key] || key.replace(/_/g, ' '),
+                value: entry.path || '',
+                url: entry.url || '',
+                required: Boolean(requiredByBackendKey[key]),
+              }
+            })
+            if (!cancelled) {
+              setApiDocuments(mapped)
+              setApiDocumentsLoading(false)
+            }
+            return
+          }
+          if (response.status === 404) {
+            lastError = new Error(data.message || 'Documents not found for this submission.')
+            continue
+          }
+          throw new Error(data.message || 'Failed to load documents.')
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error('Failed to load documents.')
+          continue
+        }
+      }
+      if (!cancelled) {
+        setApiDocuments([])
+        setApiDocumentsError(lastError?.message || 'Failed to load documents.')
+        setApiDocumentsLoading(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedSubmission, authToken])
+
+  const displayedDocuments = apiDocuments.length > 0 ? apiDocuments : (selectedSubmission?.documents || [])
 
   function handleModuleChange(moduleName) {
     setActiveModule(moduleName)
@@ -157,6 +272,11 @@ function SubmittedApplicationsPage() {
 
   function handleLogout() {
     window.localStorage.removeItem('mucm-auth-session')
+    window.localStorage.removeItem('mucm-application-form')
+    window.localStorage.removeItem('mucm-current-step')
+    window.localStorage.removeItem('mucm-submitted-applications')
+    window.localStorage.removeItem('mucm-active-application')
+    window.localStorage.removeItem('mucm-support-center-tab')
     navigate('/login')
   }
 
@@ -296,10 +416,18 @@ function SubmittedApplicationsPage() {
                         <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#0A1628]/40">
                           Documents
                         </p>
+                        {apiDocumentsLoading ? (
+                          <p className="mt-2 text-xs text-[#0A1628]/55">Loading documents from server...</p>
+                        ) : null}
+                        {apiDocumentsError ? (
+                          <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-700">
+                            {apiDocumentsError}
+                          </p>
+                        ) : null}
                         <div className="mt-2 space-y-2">
-                          {selectedSubmission.documents.map((doc) => (
+                          {displayedDocuments.map((doc) => (
                             <div
-                              key={`${selectedSubmission.id}-${doc.name}`}
+                              key={`${selectedSubmission.id}-${doc.key || doc.name || doc.label}`}
                               className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#0A1628]/8 bg-[#F8F7F4] px-3 py-2"
                             >
                               <div className="min-w-0">
@@ -307,6 +435,16 @@ function SubmittedApplicationsPage() {
                                 <p className="text-xs text-[#0A1628]/50">
                                   {doc.value ? doc.value : 'Not uploaded'}
                                 </p>
+                                {doc.url ? (
+                                  <a
+                                    href={doc.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="mt-1 inline-block text-xs font-medium text-[#b98a22] underline underline-offset-2 hover:text-[#8a6918]"
+                                  >
+                                    View uploaded document
+                                  </a>
+                                ) : null}
                               </div>
                               <span
                                 className={`rounded-full px-2.5 py-1 text-xs font-semibold ${

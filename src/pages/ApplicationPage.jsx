@@ -11,15 +11,15 @@ import {
   fetchSupportTicketCategories,
 } from '../api/faqApi.js'
 import { apiUrl } from '../config/baseUrl.js'
-import { applicationSteps } from '../data/applicationSteps.js'
+import { applicationSteps, buildApplicationSteps } from '../data/applicationSteps.js'
 import { countries } from '../data/countries.js'
 import {
   faqSections,
   faqSupport,
   moduleNavigation,
-  notificationItems,
 } from '../data/sidebarModulesContent.js'
 import { usePersistentState } from '../hooks/usePersistentState.js'
+import { useDropdownOptions } from '../hooks/useDropdownOptions.js'
 import { getAutofillStudentInfo } from '../utils/studentInfoAutofill.js'
 import { downloadApplicationSummaryPdf } from '../utils/applicationFormPdf.js'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
@@ -36,6 +36,42 @@ const crestLogo =
 const SUBMISSIONS_KEY = 'mucm-submitted-applications'
 const ACTIVE_APPLICATION_KEY = 'mucm-active-application'
 const SUBMIT_COOLDOWN_DAYS = Number(import.meta.env.VITE_APPLICATION_RESUBMIT_COOLDOWN_DAYS) || 30
+const DOCUMENT_TYPE_BY_FIELD = {
+  passport: 'passport',
+  bankStatement: 'bankStatement',
+  preMedTranscript: 'preMedTranscript',
+  grade11Transcript: 'grade11Transcript',
+  cv: 'cv',
+  passportPhoto: 'passportPhoto',
+  otherProfessionalTranscripts: 'otherProfessionalTranscripts',
+  examResults: 'examResults',
+  sponsorSignedFinancialForm: 'sponsorSignedFinancialForm',
+  reviewSignatureUpload: 'reviewSignatureDocument',
+}
+const BACKEND_DOCUMENT_LABELS = {
+  passport: 'Passport',
+  bank_statement: 'Bank Statement (Minimum 3 Months)',
+  premedical_Bachelor_ug_HSC_Certificate: 'Premedical / Bachelor / Undergraduate / 12th Grade Transcript',
+  Secondary_11grade: '11th Grade Transcript',
+  cv_resume: 'CV / Resume',
+  passport_photo: 'Passport-Size Photograph',
+  other_professional_transcripts: 'Other professional transcripts / certifications / awards',
+  exam_results_marksheet: 'Exam Results Marksheet (MCAT / NEET / UCAT)',
+  sponsor_signed_financial_form: 'Upload signed sponsor form',
+  review_signature_document: 'Review Signature Document',
+}
+const BACKEND_DOCUMENT_ORDER = [
+  'passport',
+  'bank_statement',
+  'premedical_Bachelor_ug_HSC_Certificate',
+  'Secondary_11grade',
+  'cv_resume',
+  'passport_photo',
+  'other_professional_transcripts',
+  'exam_results_marksheet',
+  'sponsor_signed_financial_form',
+  'review_signature_document',
+]
 
 function getSupportTicketStatusStyles(status) {
   switch (String(status ?? '').toLowerCase()) {
@@ -138,6 +174,20 @@ function ApplicationPage() {
     String(authSession?.userId ?? '').trim() ||
     String(authSession?.id ?? '').trim() ||
     decodeJwtSub(authToken)
+  const { options: dynOptions, programs: dynPrograms, docRequirements: dynDocRequirements, loading: dynLoading } = useDropdownOptions()
+  const dynamicSteps = useMemo(() => buildApplicationSteps(dynOptions, dynPrograms, dynDocRequirements), [dynOptions, dynPrograms, dynDocRequirements])
+
+  // Extract program/subProgram options for autofill
+  const { programTypeOptions, subProgramOptions } = useMemo(() => {
+    const academicStep = dynamicSteps.find((s) => s.id === 'academicBackground')
+    const programField = academicStep?.fields.find((f) => f.name === 'programType')
+    const subProgramField = academicStep?.fields.find((f) => f.name === 'subProgram')
+    return {
+      programTypeOptions: programField?.options ?? [],
+      subProgramOptions: subProgramField?.options ?? [],
+    }
+  }, [dynamicSteps])
+
   const [activeModule, setActiveModule] = useState('Application form')
   const [currentStepIndex, setCurrentStepIndex] = usePersistentState(
     'mucm-current-step',
@@ -173,6 +223,7 @@ function ApplicationPage() {
   const [faqError, setFaqError] = useState('')
   const [faqSearch, setFaqSearch] = useState('')
   const [faqCategory, setFaqCategory] = useState('')
+  const [statusNotifications, setStatusNotifications] = useState([])
   const [cooldownNotice, setCooldownNotice] = useState({
     isBlocked: false,
     nextAllowedAt: null,
@@ -274,6 +325,13 @@ function ApplicationPage() {
       }
 
       if (response.status === 404) {
+        const message = String(data?.message || '').toLowerCase()
+        // Route exists, but this application id does not exist in backend DB.
+        // Stop probing fallback prefixes to avoid noisy repeated 404 requests.
+        if (message.includes('application not found')) {
+          applicationsPrefixRef.current = basePath
+          return null
+        }
         lastError = new Error(data.message || 'Application not found.')
         continue
       }
@@ -288,10 +346,10 @@ function ApplicationPage() {
   }
 
   function normalizeText(value) {
-    if (value === undefined || value === null) return null
+    if (value === undefined || value === null) return ''
     if (typeof value === 'string') {
       const trimmed = value.trim()
-      return trimmed === '' ? null : trimmed
+      return trimmed === '' ? '' : trimmed
     }
     return value
   }
@@ -696,6 +754,9 @@ function ApplicationPage() {
       personal_statement: formValues.personalStatement || undefined,
       application_agreement_accepted: Boolean(formValues.applicationAgreement),
       application_agreement_at: formValues.applicationAgreement ? new Date().toISOString() : undefined,
+      review_signature_method: normalizeText(formValues.reviewSignatureMethod),
+      review_signature_typed: normalizeText(formValues.reviewSignatureTyped),
+      review_signature_upload: normalizeText(formValues.reviewSignatureUpload),
     }
   }
 
@@ -869,7 +930,9 @@ function ApplicationPage() {
       return
     }
     setActiveModule(requestedModule)
-  }, [location.state])
+    // Consume one-time router state so browser refresh does not reopen the module.
+    navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true })
+  }, [location.state, location.pathname, location.search, location.hash, navigate])
 
   useEffect(() => {
     setFormValues((prev) => {
@@ -886,7 +949,7 @@ function ApplicationPage() {
     // Repair legacy saved value: select can visually show first option
     // while stored value is invalid and fails validation.
     setFormValues((prev) => {
-      const englishField = applicationSteps
+      const englishField = dynamicSteps
         .flatMap((step) => step.fields)
         .find((field) => field.name === 'englishProficiency')
       const allowed = getSelectValues(englishField?.options ?? [])
@@ -907,7 +970,7 @@ function ApplicationPage() {
       return
     }
     setFormValues((prev) => {
-      const auto = getAutofillStudentInfo(prev)
+      const auto = getAutofillStudentInfo(prev, programTypeOptions, subProgramOptions)
       if (
         prev.studentName === auto.studentName &&
         prev.programOfStudy === auto.programOfStudy &&
@@ -954,12 +1017,12 @@ function ApplicationPage() {
   }, [formValues, currentStepIndex, submitted])
 
   const currentStep = useMemo(
-    () => applicationSteps[currentStepIndex] ?? applicationSteps[0],
-    [currentStepIndex],
+    () => dynamicSteps[currentStepIndex] ?? dynamicSteps[0],
+    [currentStepIndex, dynamicSteps],
   )
   const uploadedDocuments = useMemo(() => {
     const documentStep =
-      applicationSteps.find((step) => step.id === 'documents')?.fields ?? []
+      dynamicSteps.find((step) => step.id === 'documents')?.fields ?? []
 
     return documentStep
       .filter((field) => field.type === 'file')
@@ -968,7 +1031,223 @@ function ApplicationPage() {
       value: formValues[field.name],
       required: Boolean(field.required),
       }))
-  }, [formValues])
+  }, [formValues, dynamicSteps])
+  const submittedApplications = useMemo(() => {
+    try {
+      const raw = JSON.parse(window.localStorage.getItem(SUBMISSIONS_KEY) ?? '[]')
+      const all = Array.isArray(raw) ? raw : []
+      return all.filter((item) => item.userEmail === userEmail)
+    } catch {
+      return []
+    }
+  }, [userEmail, submitted, lastSubmissionId])
+  const [selectedDocumentSubmissionId, setSelectedDocumentSubmissionId] = useState('')
+  const [serverDocumentData, setServerDocumentData] = useState(null)
+  const [serverDocumentLoading, setServerDocumentLoading] = useState(false)
+  const [serverDocumentError, setServerDocumentError] = useState('')
+  const selectedDocumentSubmission = useMemo(() => {
+    return (
+      submittedApplications.find((item) => item.id === selectedDocumentSubmissionId) ??
+      submittedApplications[0] ??
+      null
+    )
+  }, [submittedApplications, selectedDocumentSubmissionId])
+  const selectedDocumentSubmissionKey = selectedDocumentSubmission?.id ?? ''
+  const selectedDocumentSubmissionRowId = String(
+    selectedDocumentSubmission?.applicationRowId || '',
+  ).trim()
+
+  useEffect(() => {
+    if (submittedApplications.length === 0) {
+      if (selectedDocumentSubmissionId !== '') {
+        setSelectedDocumentSubmissionId('')
+      }
+      return
+    }
+    const exists = submittedApplications.some((item) => item.id === selectedDocumentSubmissionId)
+    if (!exists) {
+      setSelectedDocumentSubmissionId(submittedApplications[0].id)
+    }
+  }, [submittedApplications, selectedDocumentSubmissionId])
+
+  function resolveStoredFileUrl(storedPath) {
+    const raw = String(storedPath ?? '').trim()
+    if (!raw) return ''
+    if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('data:')) return raw
+    const normalized = raw.startsWith('/') ? raw : `/${raw}`
+    return apiUrl(normalized)
+  }
+
+  function mapNotificationTone(statusLabel) {
+    const s = String(statusLabel || '').toLowerCase()
+    if (s.includes('incomplete') || s.includes('drop') || s.includes('rejected')) return 'Action Needed'
+    if (
+      s.includes('submitted') ||
+      s.includes('validation') ||
+      s.includes('review') ||
+      s.includes('complete') ||
+      s.includes('enrolled')
+    ) {
+      return 'Success'
+    }
+    return 'Info'
+  }
+
+  function formatNotificationTime(iso) {
+    if (!iso) return 'Just now'
+    const ts = new Date(iso).getTime()
+    if (!Number.isFinite(ts)) return 'Just now'
+    const diffMs = Date.now() - ts
+    const mins = Math.floor(diffMs / 60000)
+    if (mins < 1) return 'Just now'
+    if (mins < 60) return `${mins} min${mins === 1 ? '' : 's'} ago`
+    const hrs = Math.floor(mins / 60)
+    if (hrs < 24) return `${hrs} hour${hrs === 1 ? '' : 's'} ago`
+    return new Date(ts).toLocaleString()
+  }
+
+  async function uploadApplicationDocumentField(fieldName, file) {
+    const documentType = DOCUMENT_TYPE_BY_FIELD[fieldName]
+    if (!documentType) {
+      return file?.name || ''
+    }
+
+    const stepIndex = dynamicSteps.findIndex((step) => step.id === 'documents')
+    const safeStepIndex = stepIndex >= 0 ? stepIndex : currentStepIndex
+    const meta = await persistApplication({ stepIndex: safeStepIndex, isComplete: false })
+    const rowId = String(meta?.id || '').trim()
+    if (!rowId) {
+      throw new Error('Unable to resolve application ID for document upload.')
+    }
+
+    let lastError = null
+    for (const basePath of buildApplicationsPaths()) {
+      const endpoint = `${basePath}/${rowId}/document/upload?documentType=${encodeURIComponent(documentType)}`
+      const formData = new FormData()
+      formData.append('file', file)
+      try {
+        const response = await fetch(apiUrl(endpoint), {
+          method: 'POST',
+          headers: {
+            ...getAuthHeader(),
+          },
+          body: formData,
+        })
+        const data = await response.json().catch(() => ({}))
+        if (response.ok && data.success !== false) {
+          applicationsPrefixRef.current = basePath
+          return String(data?.data?.storedPath || '')
+        }
+        if (response.status === 404) {
+          lastError = new Error(data.message || 'Document upload endpoint not found.')
+          continue
+        }
+        throw new Error(data.message || 'Failed to upload document.')
+      } catch (error) {
+        if (error instanceof Error) {
+          throw error
+        }
+        throw new Error('Failed to upload document.')
+      }
+    }
+    throw lastError || new Error('Document upload endpoint not found.')
+  }
+
+  useEffect(() => {
+    if (activeModule !== 'Document') return
+    const preferredApplicationId = String(
+      selectedDocumentSubmissionKey || activeApplication.applicationId || '',
+    ).trim()
+    if (!preferredApplicationId) {
+      setServerDocumentData(null)
+      setServerDocumentError('')
+      return
+    }
+
+    let cancelled = false
+    setServerDocumentLoading(true)
+    setServerDocumentError('')
+    ;(async () => {
+      if (selectedDocumentSubmissionRowId) {
+        const listData = await requestApplicationApi('GET', `/${selectedDocumentSubmissionRowId}/document`)
+        const rows = Array.isArray(listData?.data) ? listData.data : []
+        return rows[0] || null
+      }
+
+      const candidateApplicationIds = [
+        preferredApplicationId,
+        String(activeApplication.applicationId || '').trim(),
+      ].filter(Boolean)
+      const uniqueCandidates = [...new Set(candidateApplicationIds)]
+
+      let matchedApplication = null
+      for (const appId of uniqueCandidates) {
+        matchedApplication = await fetchApplicationByApplicationId(appId)
+        if (matchedApplication?.id) break
+      }
+
+      if (!matchedApplication?.id) {
+        return null
+      }
+
+      const listData = await requestApplicationApi('GET', `/${matchedApplication.id}/document`)
+      const rows = Array.isArray(listData?.data) ? listData.data : []
+      return rows[0] || null
+    })()
+      .then((documentRow) => {
+        if (cancelled) return
+        setServerDocumentData(documentRow)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setServerDocumentData(null)
+        setServerDocumentError(error?.message || 'Unable to load uploaded documents from server.')
+      })
+      .finally(() => {
+        if (!cancelled) setServerDocumentLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeModule,
+    selectedDocumentSubmissionKey,
+    selectedDocumentSubmissionRowId,
+    activeApplication.applicationId,
+  ])
+
+  useEffect(() => {
+    if (activeModule !== 'Notification') return
+    if (!authToken) {
+      setStatusNotifications([])
+      return
+    }
+
+    let cancelled = false
+    requestApplicationApi('GET', '/notifications/my')
+      .then((data) => {
+        if (cancelled) return
+        const rows = Array.isArray(data?.data) ? data.data : []
+        setStatusNotifications(
+          rows.map((row) => ({
+            id: row.id,
+            title: row.status_label ? `Status changed: ${row.status_label}` : 'Application status updated',
+            message: row.message || 'Your application status was updated by admissions.',
+            status: mapNotificationTone(row.status_label || row.status_key),
+            time: formatNotificationTime(row.created_at),
+          })),
+        )
+      })
+      .catch(() => {
+        if (cancelled) return
+        setStatusNotifications([])
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeModule, authToken])
 
   function validateField(field, value) {
     const stringValue = typeof value === 'string' ? value.trim() : value
@@ -994,7 +1273,12 @@ function ApplicationPage() {
     }
 
     if (field.type === 'tel') {
-      const digits = String(stringValue).replace(/\D/g, '')
+      const phoneRaw = String(stringValue).trim()
+      // Treat "country code only" as empty for optional phone fields.
+      if (!field.required && /^\+\d{1,4}$/.test(phoneRaw)) {
+        return ''
+      }
+      const digits = phoneRaw.replace(/\D/g, '')
       if (digits.length < 7) {
         return 'Please enter a valid phone number.'
       }
@@ -1095,6 +1379,13 @@ function ApplicationPage() {
           next.studentSignatureUpload = ''
         }
       }
+      if (name === 'reviewSignatureMethod') {
+        if (value === 'upload') {
+          next.reviewSignatureTyped = ''
+        } else if (value === 'type') {
+          next.reviewSignatureUpload = ''
+        }
+      }
       return next
     })
 
@@ -1116,9 +1407,13 @@ function ApplicationPage() {
         delete nextErrors.studentSignatureUpload
         delete nextErrors.studentSignatureTyped
       }
+      if (name === 'reviewSignatureMethod') {
+        delete nextErrors.reviewSignatureUpload
+        delete nextErrors.reviewSignatureTyped
+      }
 
       const activeField =
-        applicationSteps
+        dynamicSteps
           .flatMap((step) => step.fields)
           .find((field) => field.name === name) ?? null
 
@@ -1162,7 +1457,7 @@ function ApplicationPage() {
 
     setValidationErrors({})
     setFormError('')
-    const nextStepIndex = Math.min(currentStepIndex + 1, applicationSteps.length - 1)
+    const nextStepIndex = Math.min(currentStepIndex + 1, dynamicSteps.length - 1)
     try {
       // Explicit checkpoint save on every Save & Continue click.
       window.localStorage.setItem('mucm-application-form', JSON.stringify(formValues))
@@ -1182,6 +1477,41 @@ function ApplicationPage() {
 
   function handlePrevious() {
     setCurrentStepIndex((previous) => Math.max(previous - 1, 0))
+  }
+
+  function handleStepClick(targetStepIndex) {
+    const safeTarget = Math.max(0, Math.min(Number(targetStepIndex) || 0, dynamicSteps.length - 1))
+
+    // Always allow navigating backwards.
+    if (safeTarget <= currentStepIndex) {
+      setCurrentStepIndex(safeTarget)
+      return
+    }
+
+    const aggregateErrors = {}
+    let firstInvalidStep = -1
+
+    for (let index = 0; index < safeTarget; index += 1) {
+      const step = dynamicSteps[index]
+      const stepErrors = validateStep(step, formValues)
+      if (Object.keys(stepErrors).length > 0) {
+        if (firstInvalidStep === -1) {
+          firstInvalidStep = index
+        }
+        Object.assign(aggregateErrors, stepErrors)
+      }
+    }
+
+    if (firstInvalidStep !== -1) {
+      setValidationErrors((previous) => ({ ...previous, ...aggregateErrors }))
+      setFormError('Please complete the current step before moving to the next one.')
+      setCurrentStepIndex(firstInvalidStep)
+      return
+    }
+
+    setValidationErrors({})
+    setFormError('')
+    setCurrentStepIndex(safeTarget)
   }
 
   async function handleSaveDraft() {
@@ -1224,7 +1554,7 @@ function ApplicationPage() {
     let firstInvalidStep = -1
     const allErrors = {}
 
-    applicationSteps.forEach((step, stepIndex) => {
+    dynamicSteps.forEach((step, stepIndex) => {
       const stepErrors = validateStep(step, formValues)
       if (Object.keys(stepErrors).length > 0 && firstInvalidStep === -1) {
         firstInvalidStep = stepIndex
@@ -1246,7 +1576,7 @@ function ApplicationPage() {
     let persistedApplicationMeta = activeApplication
     try {
       persistedApplicationMeta = await persistApplication({
-        stepIndex: applicationSteps.length - 1,
+        stepIndex: dynamicSteps.length - 1,
         isComplete: true,
       })
       await syncApplicationSections(persistedApplicationMeta.id)
@@ -1255,7 +1585,7 @@ function ApplicationPage() {
       return
     }
     const documentFields =
-      applicationSteps
+      dynamicSteps
         .find((step) => step.id === 'documents')
         ?.fields.filter((field) => field.type === 'file') ?? []
     const applicationId = persistedApplicationMeta.applicationId || `APP-${Date.now()}`
@@ -1266,6 +1596,7 @@ function ApplicationPage() {
         : JSON.parse(JSON.stringify(formValues))
     const submittedRecord = {
       id: applicationId,
+      applicationRowId: String(persistedApplicationMeta.id || ''),
       submittedAt,
       userEmail,
       applicantName: `${formValues.firstName ?? ''} ${formValues.surname ?? ''}`.trim() || 'Applicant',
@@ -1306,7 +1637,7 @@ function ApplicationPage() {
   async function handleDownloadApplicationForm() {
     const valuesForPdf = submitted && submittedSnapshot ? submittedSnapshot : formValues
     const sections = []
-    applicationSteps
+    dynamicSteps
       .filter((step) => step.id !== 'reviewSubmit')
       .forEach((step) => {
         const visibleFields = step.fields.filter(
@@ -1354,6 +1685,11 @@ function ApplicationPage() {
 
   function handleLogout() {
     window.localStorage.removeItem('mucm-auth-session')
+    window.localStorage.removeItem('mucm-application-form')
+    window.localStorage.removeItem('mucm-current-step')
+    window.localStorage.removeItem('mucm-submitted-applications')
+    window.localStorage.removeItem('mucm-active-application')
+    window.localStorage.removeItem('mucm-support-center-tab')
     navigate('/login')
   }
 
@@ -1417,17 +1753,17 @@ function ApplicationPage() {
             isSaving ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'
           }`}
         />
-        <span className="font-medium">{isSaving ? 'Saving...' : 'All changes saved'}</span>
+        <span className="font-medium">{isSaving ? 'Saving...' : 'Changes saved'}</span>
       </p>
     )
   }
 
   function renderModuleContent() {
     if (activeModule === 'Notification') {
-      const actionNeeded = notificationItems.filter(
+      const actionNeeded = statusNotifications.filter(
         (item) => item.status === 'Action Needed',
       ).length
-      const successCount = notificationItems.filter(
+      const successCount = statusNotifications.filter(
         (item) => item.status === 'Success',
       ).length
 
@@ -1449,7 +1785,7 @@ function ApplicationPage() {
             <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#0A1628]/45">Total Alerts</p>
               <p className="mt-1 text-2xl font-semibold text-[#0A1628]">
-                {notificationItems.length}
+                {statusNotifications.length}
               </p>
             </div>
             <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-4 shadow-sm">
@@ -1464,12 +1800,12 @@ function ApplicationPage() {
 
           <div className="space-y-3 rounded-xl border border-border bg-card p-4 shadow-sm sm:p-5">
             <h3 className="text-lg font-semibold text-[#0A1628]">Recent Activity</h3>
-            {notificationItems.map((item, index) => (
+            {statusNotifications.map((item, index) => (
               <article
-                key={item.title}
+                key={item.id || item.title}
                 className="relative rounded-xl border border-border bg-muted p-4"
               >
-                {index !== notificationItems.length - 1 ? (
+                {index !== statusNotifications.length - 1 ? (
                   <span className="pointer-events-none absolute bottom-[-14px] left-4 top-[calc(100%_-_4px)] w-px bg-[#0A1628]/12" />
                 ) : null}
                 <div className="flex items-start justify-between gap-2">
@@ -1484,6 +1820,9 @@ function ApplicationPage() {
                 </div>
               </article>
             ))}
+            {statusNotifications.length === 0 ? (
+              <p className="text-sm text-[#0A1628]/60">No status notifications yet.</p>
+            ) : null}
           </div>
         </section>
       )
@@ -1836,7 +2175,44 @@ function ApplicationPage() {
     }
 
     if (activeModule === 'Document') {
-      const requiredDocs = uploadedDocuments.filter((item) => item.required)
+      const sourceDocuments =
+        serverDocumentData?.files
+          ? (() => {
+              const files = serverDocumentData.files || {}
+              const orderedKeys = [
+                ...BACKEND_DOCUMENT_ORDER.filter((key) => Object.prototype.hasOwnProperty.call(files, key)),
+                ...Object.keys(files).filter((key) => !BACKEND_DOCUMENT_ORDER.includes(key)),
+              ]
+              return orderedKeys
+                .map((key) => {
+                  const entry = files[key] || {}
+                  const pathValue = entry.path || ''
+                  // Prefer local API host from stored path so local/dev backend files open correctly.
+                  const urlValue = resolveStoredFileUrl(pathValue) || entry.url || ''
+                  return {
+                    key,
+                    label: BACKEND_DOCUMENT_LABELS[key] || key.replace(/_/g, ' '),
+                    value: pathValue,
+                    url: urlValue,
+                    required: false,
+                  }
+                })
+                .filter((item) => String(item.value || '').trim() !== '')
+            })()
+          : selectedDocumentSubmission?.documents && selectedDocumentSubmission.documents.length > 0
+          ? selectedDocumentSubmission.documents.map((doc) => ({
+              key: doc.name || doc.label,
+              label: doc.label,
+              value: doc.value,
+              url: resolveStoredFileUrl(doc.value),
+              required: Boolean(doc.required),
+            })).filter((item) => String(item.value || '').trim() !== '')
+          : uploadedDocuments.map((doc) => ({
+              key: doc.label,
+              ...doc,
+              url: resolveStoredFileUrl(doc.value),
+            })).filter((item) => String(item.value || '').trim() !== '')
+      const requiredDocs = sourceDocuments.filter((item) => item.required)
       const uploadedRequiredCount = requiredDocs.filter((item) => item.value).length
       const completionPercent = requiredDocs.length
         ? Math.round((uploadedRequiredCount / requiredDocs.length) * 100)
@@ -1852,9 +2228,50 @@ function ApplicationPage() {
               Document Center
             </h2>
             <p className="mt-1 text-sm text-[#0A1628]/55">
-              Monitor required uploads, document status, and completion progress.
+              Monitor required uploads, document status, and completion progress. Select a submitted
+              application ID to view its saved documents.
             </p>
           </div>
+
+          {submittedApplications.length > 0 ? (
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-[300px_minmax(0,1fr)]">
+              <aside className="rounded-xl border border-border bg-card p-3 shadow-sm">
+                <p className="px-2 pb-2 text-xs font-semibold uppercase tracking-[0.14em] text-[#0A1628]/45">
+                  Submitted IDs
+                </p>
+                <div className="space-y-1.5">
+                  {submittedApplications.map((submission) => {
+                    const isSelected = selectedDocumentSubmission?.id === submission.id
+                    return (
+                      <button
+                        key={submission.id}
+                        type="button"
+                        onClick={() => setSelectedDocumentSubmissionId(submission.id)}
+                        className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${
+                          isSelected
+                            ? 'border-[#D4A843]/65 bg-[#fff8e8] text-[#0A1628]'
+                            : 'border-border bg-white text-[#0A1628]/70 hover:border-[#D4A843]/35 hover:bg-[#F8F7F4]'
+                        }`}
+                      >
+                        <p className="font-semibold">{submission.id}</p>
+                        <p className="mt-0.5 text-xs text-[#0A1628]/45">
+                          {new Date(submission.submittedAt).toLocaleString()}
+                        </p>
+                      </button>
+                    )
+                  })}
+                </div>
+              </aside>
+              <div className="rounded-xl border border-border bg-card p-4 shadow-sm sm:p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#0A1628]/45">
+                  Viewing Submission
+                </p>
+                <p className="mt-1 text-sm font-semibold text-[#0A1628]">
+                  {selectedDocumentSubmission?.id ?? 'Current draft'}
+                </p>
+              </div>
+            </div>
+          ) : null}
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
@@ -1865,7 +2282,7 @@ function ApplicationPage() {
             </div>
             <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#0A1628]/45">Total Files</p>
-              <p className="mt-1 text-2xl font-semibold text-[#0A1628]">{uploadedDocuments.length}</p>
+              <p className="mt-1 text-2xl font-semibold text-[#0A1628]">{sourceDocuments.length}</p>
             </div>
             <div className="rounded-xl border border-[#D4A843]/35 bg-[#fff8e8] p-4 shadow-sm">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#7a5a14]">Completion</p>
@@ -1874,6 +2291,14 @@ function ApplicationPage() {
           </div>
 
           <div className="rounded-xl border border-border bg-card p-4 shadow-sm sm:p-5">
+            {serverDocumentLoading ? (
+              <p className="mb-3 text-xs text-[#0A1628]/55">Loading uploaded documents from server...</p>
+            ) : null}
+            {serverDocumentError ? (
+              <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                {serverDocumentError}
+              </p>
+            ) : null}
             <div className="mb-4">
               <div className="flex items-center justify-between text-xs text-[#0A1628]/55">
                 <span>Required documents completion</span>
@@ -1888,9 +2313,9 @@ function ApplicationPage() {
             </div>
 
             <div className="space-y-2.5">
-              {uploadedDocuments.map((item) => (
+              {sourceDocuments.length > 0 ? sourceDocuments.map((item) => (
                 <div
-                  key={item.label}
+                  key={item.key || item.label}
                   className="flex flex-col gap-2 rounded-xl border border-border bg-muted px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div className="min-w-0">
@@ -1898,6 +2323,16 @@ function ApplicationPage() {
                     <p className="truncate text-xs text-[#0A1628]/50">
                       {item.value ? item.value : 'Not uploaded'}
                     </p>
+                    {item.url ? (
+                      <a
+                        href={item.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 inline-block text-xs font-medium text-[#b98a22] underline underline-offset-2 hover:text-[#8a6918]"
+                      >
+                        View uploaded document
+                      </a>
+                    ) : null}
                   </div>
                   <span
                     className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-semibold ${
@@ -1911,7 +2346,11 @@ function ApplicationPage() {
                     {item.value ? 'Uploaded' : item.required ? 'Required' : 'Optional'}
                   </span>
                 </div>
-              ))}
+              )) : (
+                <p className="rounded-lg border border-border bg-muted px-3 py-2.5 text-sm text-[#0A1628]/60">
+                  No uploaded documents found for this application ID.
+                </p>
+              )}
             </div>
           </div>
         </section>
@@ -1922,21 +2361,23 @@ function ApplicationPage() {
       <StepForm
         step={currentStep}
         stepNumber={currentStepIndex + 1}
-        totalSteps={applicationSteps.length}
-        steps={applicationSteps}
+        totalSteps={dynamicSteps.length}
+        steps={dynamicSteps}
         currentIndex={currentStepIndex}
-        onStepClick={setCurrentStepIndex}
+        onStepClick={handleStepClick}
         values={formValues}
         errors={validationErrors}
         formError={formError}
         draftNotice={draftNotice}
         onChange={updateField}
+        onFileUpload={uploadApplicationDocumentField}
         onNext={handleNext}
         onPrevious={handlePrevious}
         onSaveDraft={handleSaveDraft}
         canGoBack={currentStepIndex > 0}
-        isLastStep={currentStepIndex === applicationSteps.length - 1}
+        isLastStep={currentStepIndex === dynamicSteps.length - 1}
         onSubmit={handleSubmit}
+        isLoadingStep={dynLoading && currentStep?.id === 'documents'}
       />
     )
   }
@@ -1994,16 +2435,13 @@ function ApplicationPage() {
               </div>
               <div className="flex items-center gap-1.5">
                 {renderAutoSaveBadge('mobile')}
-                <ProfileDropdown email={userEmail} onLogout={handleLogout} />
+                <ProfileDropdown
+                  email={userEmail}
+                  onLogout={handleLogout}
+                  onBackToChecklist={() => navigate('/before-you-begin')}
+                />
               </div>
             </div>
-            <PrimaryButton
-              variant="outline"
-              type="button"
-              onClick={() => navigate('/before-you-begin')}
-            >
-              Checklist
-            </PrimaryButton>
           </div>
         </header>
       ) : null}
@@ -2151,14 +2589,11 @@ function ApplicationPage() {
               </div>
               <div className="flex items-center gap-3">
                 {renderAutoSaveBadge()}
-                <PrimaryButton
-                  variant="outline"
-                  type="button"
-                  onClick={() => navigate('/before-you-begin')}
-                >
-                  Back to Checklist
-                </PrimaryButton>
-                <ProfileDropdown email={userEmail} onLogout={handleLogout} />
+                <ProfileDropdown
+                  email={userEmail}
+                  onLogout={handleLogout}
+                  onBackToChecklist={() => navigate('/before-you-begin')}
+                />
               </div>
             </div>
             {renderModuleContent()}

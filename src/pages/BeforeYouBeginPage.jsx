@@ -25,6 +25,11 @@ function BeforeYouBeginPage() {
 
   function handleLogout() {
     window.localStorage.removeItem('mucm-auth-session')
+    window.localStorage.removeItem('mucm-application-form')
+    window.localStorage.removeItem('mucm-current-step')
+    window.localStorage.removeItem('mucm-submitted-applications')
+    window.localStorage.removeItem('mucm-active-application')
+    window.localStorage.removeItem('mucm-support-center-tab')
     navigate('/login')
   }
 

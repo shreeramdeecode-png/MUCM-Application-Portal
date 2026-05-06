@@ -79,6 +79,8 @@ export default function FileDropzone({
   onUploadActivityChange,
   /** If true (image-only accepts), store a data URL so the UI can preview the image. */
   storeAsDataUrl = false,
+  /** Optional backend upload handler: async (file) => stored value string. */
+  onUploadFile,
   /** Smaller dropzone / success card (e.g. signature). */
   compact = false,
 }) {
@@ -131,7 +133,16 @@ export default function FileDropzone({
   }, [])
 
   const finalizeFile = useCallback(
-    (file) => {
+    async (file) => {
+      if (typeof onUploadFile === 'function') {
+        const uploadedValue = await onUploadFile(file)
+        if (!uploadedValue || String(uploadedValue).trim() === '') {
+          throw new Error('Upload completed but no file path was returned.')
+        }
+        onChange(String(uploadedValue))
+        syncInputFile(file)
+        return
+      }
       const useData =
         storeAsDataUrl && isImageAccept(accept) && file.type.startsWith('image/')
       if (useData) {
@@ -150,7 +161,7 @@ export default function FileDropzone({
       onChange(file.name)
       syncInputFile(file)
     },
-    [accept, onChange, storeAsDataUrl, syncInputFile],
+    [accept, onChange, onUploadFile, storeAsDataUrl, syncInputFile],
   )
 
   const startUpload = useCallback(
@@ -166,9 +177,13 @@ export default function FileDropzone({
 
       const run = runUploadProgress(setUploadProgress, controller.signal)
       run(file)
-        .then(() => {
+        .then(async () => {
           if (controller.signal.aborted) return
-          finalizeFile(file)
+          await finalizeFile(file)
+        })
+        .catch((err) => {
+          if (err?.name === 'AbortError') return
+          setDropHint(err?.message || 'Upload failed. Please try again.')
         })
         .finally(() => {
           onUploadActivityChange?.(-1)
