@@ -316,7 +316,9 @@ function StepForm({
   onSubmit,
   isLoadingStep = false,
 }) {
-  const progressPercent = Math.round((stepNumber / totalSteps) * 100)
+  // 0% on first step, 100% on final step (stepNumber is 1-based for display only).
+  const progressPercent =
+    totalSteps <= 1 ? 100 : Math.round((currentIndex / (totalSteps - 1)) * 100)
   const [uploadActivityCount, setUploadActivityCount] = useState(0)
   const reportUploadActivity = useCallback((delta) => {
     setUploadActivityCount((c) => Math.max(0, c + delta))

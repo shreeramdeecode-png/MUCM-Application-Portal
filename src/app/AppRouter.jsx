@@ -8,6 +8,17 @@ import SettingsPage from '../pages/SettingsPage.jsx'
 import SubmittedApplicationsPage from '../pages/SubmittedApplicationsPage.jsx'
 import { usePersistentState } from '../hooks/usePersistentState.js'
 import { apiUrl } from '../config/baseUrl.js'
+import { shouldSkipBeforeYouBegin } from '../utils/applicantStorageKeys.js'
+
+function AuthenticatedHomeRedirect({ authSession }) {
+  const sessionPayload = {
+    email: authSession.email,
+    token: authSession.token,
+    userId: authSession.userId,
+  }
+  const target = shouldSkipBeforeYouBegin(sessionPayload) ? '/application' : '/before-you-begin'
+  return <Navigate to={target} replace />
+}
 
 function AppRouter() {
   const [authSession, setAuthSession] = usePersistentState('mucm-auth-session', {
@@ -81,7 +92,9 @@ function AppRouter() {
 
     const token = payload.token || payload.data?.token || payload.accessToken || ''
     const userId = payload.data?.user?.id || payload.user?.id || ''
-    setAuthSession({ isAuthenticated: true, email: normalizedEmail, token, userId })
+    const nextSession = { isAuthenticated: true, email: normalizedEmail, token, userId }
+    setAuthSession(nextSession)
+    return nextSession
   }
 
   return (
@@ -90,7 +103,7 @@ function AppRouter() {
         path="/"
         element={
           authSession.isAuthenticated ? (
-            <Navigate to="/before-you-begin" replace />
+            <AuthenticatedHomeRedirect authSession={authSession} />
           ) : (
             <LoginPage
               onRequestOtp={handleRequestOtp}
@@ -161,10 +174,11 @@ function AppRouter() {
       <Route
         path="*"
         element={
-          <Navigate
-            to={authSession.isAuthenticated ? '/before-you-begin' : '/'}
-            replace
-          />
+          authSession.isAuthenticated ? (
+            <AuthenticatedHomeRedirect authSession={authSession} />
+          ) : (
+            <Navigate to="/" replace />
+          )
         }
       />
     </Routes>

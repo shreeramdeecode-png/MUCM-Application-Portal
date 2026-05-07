@@ -1,9 +1,10 @@
-import { Link, useNavigate } from 'react-router-dom'
-import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import PrimaryButton from '../components/common/PrimaryButton.jsx'
 import ProfileDropdown from '../components/common/ProfileDropdown.jsx'
 import DocumentListSection from '../components/landing/DocumentListSection.jsx'
 import { optionalDocuments, requiredDocuments } from '../data/documentChecklist.js'
+import { clearApplicantHydrationSessionFlags, getApplicantStorageScope, markBeforeYouBeginSeen, shouldSkipBeforeYouBegin } from '../utils/applicantStorageKeys.js'
 
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
@@ -19,16 +20,31 @@ function BeforeYouBeginPage() {
     }
   })()
 
+  useEffect(() => {
+    try {
+      const session = JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
+      if (shouldSkipBeforeYouBegin(session)) {
+        navigate('/application', { replace: true })
+      }
+    } catch {
+      // ignore
+    }
+  }, [navigate, userEmail])
+
   function toggleChecked(id) {
     setChecked((previous) => ({ ...previous, [id]: !previous[id] }))
   }
 
   function handleLogout() {
+    let session = {}
+    try {
+      session = JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
+    } catch {
+      session = {}
+    }
+    const scope = getApplicantStorageScope(session)
+    clearApplicantHydrationSessionFlags(scope)
     window.localStorage.removeItem('mucm-auth-session')
-    window.localStorage.removeItem('mucm-application-form')
-    window.localStorage.removeItem('mucm-current-step')
-    window.localStorage.removeItem('mucm-submitted-applications')
-    window.localStorage.removeItem('mucm-active-application')
     window.localStorage.removeItem('mucm-support-center-tab')
     navigate('/login')
   }
@@ -114,9 +130,20 @@ function BeforeYouBeginPage() {
           </section>
 
           <div className="pt-1">
-            <Link to="/application" className="block">
-              <PrimaryButton>Start Application</PrimaryButton>
-            </Link>
+            <PrimaryButton
+              type="button"
+              onClick={() => {
+                try {
+                  const session = JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
+                  markBeforeYouBeginSeen(session)
+                } catch {
+                  markBeforeYouBeginSeen({ email: userEmail })
+                }
+                navigate('/application')
+              }}
+            >
+              Start Application
+            </PrimaryButton>
             <small className="mt-2 block text-center text-xs text-[#0A1628]/35">
               Tip: Check off each required document above to confirm you have it
               ready.

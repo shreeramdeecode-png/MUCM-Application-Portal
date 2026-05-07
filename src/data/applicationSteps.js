@@ -44,15 +44,108 @@ export function buildApplicationSteps(dynOptions = {}, dynPrograms = [], dynDocR
       .replace(/^(.)/, (c) => c.toLowerCase())
   }
 
-  const dynamicDocFields = dynDocRequirements.map((doc) => ({
-      name: labelToFieldName(doc.name),
+  /** Backend / portal keys → canonical form field names (must match DOCUMENT_TYPE_BY_FIELD in ApplicationPage). */
+  const KNOWN_DOC_SLUG_TO_FORM = {
+    passport: 'passport',
+    bank_statement: 'bankStatement',
+    bankstatement: 'bankStatement',
+    premedical_bachelor_ug_hsc_certificate: 'preMedTranscript',
+    secondary_11grade: 'grade11Transcript',
+    cv_resume: 'cv',
+    cv: 'cv',
+    passport_photo: 'passportPhoto',
+    other_professional_transcripts: 'otherProfessionalTranscripts',
+    exam_results_marksheet: 'examResults',
+    sponsor_signed_financial_form: 'sponsorSignedFinancialForm',
+    review_signature_document: 'reviewSignatureUpload',
+  }
+
+  function normalizeDocSlug(raw) {
+    return String(raw ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/-/g, '_')
+  }
+
+  /**
+   * Map API document-requirements rows to stable form keys used for uploads and DB payloads.
+   * Label-derived names like `passports` would bypass upload — avoid that.
+   */
+  function resolveDocumentFormFieldName(doc) {
+    const slugCandidates = [
+      doc.fieldKey,
+      doc.field_key,
+      doc.code,
+      doc.slug,
+      doc.key,
+      doc.documentKey,
+      doc.document_key,
+    ]
+    for (const candidate of slugCandidates) {
+      const norm = normalizeDocSlug(candidate).replace(/^_+|_+$/g, '')
+      if (norm && KNOWN_DOC_SLUG_TO_FORM[norm]) {
+        return KNOWN_DOC_SLUG_TO_FORM[norm]
+      }
+    }
+
+    const raw = String(doc?.name ?? '').trim()
+    const lower = raw.toLowerCase()
+    if (!lower) {
+      return labelToFieldName(doc?.name)
+    }
+
+    if (/passport[-\s]*(size|photo|photograph)|passport[-\s]*size\s*photograph|headshot/i.test(lower)) {
+      return 'passportPhoto'
+    }
+    if (/\bpassport(s)?\b/i.test(lower)) {
+      return 'passport'
+    }
+    if (/bank\s*statement/i.test(lower)) {
+      return 'bankStatement'
+    }
+    if (/11(th)?\s*grade|secondary\s*11|\b11\s*grade\b/i.test(lower)) {
+      return 'grade11Transcript'
+    }
+    if (/premedical|pre-med|bachelor|undergraduate|\b12(th)?\s*grade\b|\bhsc\b|\bug\b.*transcript/i.test(lower)) {
+      return 'preMedTranscript'
+    }
+    if (/\bc\.?\s*v\.?\b|curriculum\s*vitae|\bresume\b/i.test(lower)) {
+      return 'cv'
+    }
+    if (/mcat|neet|ucat|exam\s*results|marksheet/i.test(lower)) {
+      return 'examResults'
+    }
+    if (/other\s*professional|certification|award/i.test(lower)) {
+      return 'otherProfessionalTranscripts'
+    }
+    if (/sponsor.*financial|financial\s*declaration|signed\s*sponsor/i.test(lower)) {
+      return 'sponsorSignedFinancialForm'
+    }
+    if (/review\s*signature|signature\s*document/i.test(lower)) {
+      return 'reviewSignatureUpload'
+    }
+
+    return labelToFieldName(doc.name)
+  }
+
+  const dynamicDocFields = []
+  const seenDocFieldNames = new Set()
+  for (const doc of dynDocRequirements) {
+    const name = resolveDocumentFormFieldName(doc)
+    if (seenDocFieldNames.has(name)) {
+      continue
+    }
+    seenDocFieldNames.add(name)
+    dynamicDocFields.push({
+      name,
       label: doc.name,
       type: 'file',
       required: Boolean(doc.required),
       accept: normalizeAccept(doc.acceptedTypes) || '.pdf,.jpg,.jpeg,.png',
       maxFileSizeMB: doc.maxSizeMb ?? 10,
       helper: `Accepted: ${doc.acceptedTypes} · Max ${doc.maxSizeMb ?? 10} MB`,
-    }))
+    })
+  }
 
 const educationDefaultItem = {
   institution: '',

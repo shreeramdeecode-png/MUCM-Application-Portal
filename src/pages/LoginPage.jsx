@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import PrimaryButton from '../components/common/PrimaryButton.jsx'
+import { shouldSkipBeforeYouBegin } from '../utils/applicantStorageKeys.js'
 
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
@@ -21,8 +22,13 @@ function LoginPage({ onRequestOtp, onLogin }) {
     setIsVerifyingOtp(true)
 
     try {
-      await onLogin(email, otp)
-      navigate('/before-you-begin')
+      const session = await onLogin(email, otp)
+      const skipIntro = shouldSkipBeforeYouBegin({
+        email: session?.email,
+        token: session?.token,
+        userId: session?.userId,
+      })
+      navigate(skipIntro ? '/application' : '/before-you-begin')
     } catch (submissionError) {
       setError(submissionError.message || 'Unable to login. Please try again.')
     } finally {

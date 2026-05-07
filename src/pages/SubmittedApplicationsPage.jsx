@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import StepSidebar from '../components/application/StepSidebar.jsx'
 import ProfileDropdown from '../components/common/ProfileDropdown.jsx'
@@ -7,10 +7,16 @@ import { apiUrl } from '../config/baseUrl.js'
 import { applicationSteps } from '../data/applicationSteps.js'
 import { isFieldVisible } from '../utils/formVisibility.js'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
+import {
+  clearApplicantHydrationSessionFlags,
+  getApplicantStorageScope,
+  migrateApplicantDraftStorage,
+  submissionsStorageKey,
+} from '../utils/applicantStorageKeys.js'
 
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
-const SUBMISSIONS_KEY = 'mucm-submitted-applications'
+const LEGACY_SUBMISSIONS_KEY = 'mucm-submitted-applications'
 const BACKEND_DOCUMENT_LABELS = {
   passport: 'Passport',
   bank_statement: 'Bank Statement (Minimum 3 Months)',
@@ -35,6 +41,68 @@ const BACKEND_DOCUMENT_ORDER = [
   'sponsor_signed_financial_form',
   'review_signature_document',
 ]
+
+/** Backend `files` keys → `documentType` query param for POST `/:rowId/document/upload` */
+const BACKEND_KEY_TO_UPLOAD_DOCUMENT_TYPE = {
+  passport: 'passport',
+  bank_statement: 'bankStatement',
+  premedical_Bachelor_ug_HSC_Certificate: 'preMedTranscript',
+  Secondary_11grade: 'grade11Transcript',
+  cv_resume: 'cv',
+  passport_photo: 'passportPhoto',
+  other_professional_transcripts: 'otherProfessionalTranscripts',
+  exam_results_marksheet: 'examResults',
+  sponsor_signed_financial_form: 'sponsorSignedFinancialForm',
+  review_signature_document: 'reviewSignatureDocument',
+}
+
+/** Form field `name` (submission snapshot) → upload documentType */
+const FORM_FIELD_TO_UPLOAD_DOCUMENT_TYPE = {
+  passport: 'passport',
+  passports: 'passport',
+  bankStatement: 'bankStatement',
+  preMedTranscript: 'preMedTranscript',
+  grade11Transcript: 'grade11Transcript',
+  cv: 'cv',
+  passportPhoto: 'passportPhoto',
+  otherProfessionalTranscripts: 'otherProfessionalTranscripts',
+  examResults: 'examResults',
+  sponsorSignedFinancialForm: 'sponsorSignedFinancialForm',
+  reviewSignatureUpload: 'reviewSignatureDocument',
+}
+
+function resolveUploadDocumentType(doc) {
+  const backendKey = doc.key
+  if (backendKey && BACKEND_KEY_TO_UPLOAD_DOCUMENT_TYPE[backendKey]) {
+    return BACKEND_KEY_TO_UPLOAD_DOCUMENT_TYPE[backendKey]
+  }
+  const fieldName = doc.name
+  if (fieldName && FORM_FIELD_TO_UPLOAD_DOCUMENT_TYPE[fieldName]) {
+    return FORM_FIELD_TO_UPLOAD_DOCUMENT_TYPE[fieldName]
+  }
+  return ''
+}
+
+async function fetchApplicationRowIdByApplicationId(applicationId, authHeader, paths) {
+  const appId = String(applicationId || '').trim()
+  if (!appId) return ''
+
+  for (const basePath of paths) {
+    try {
+      const endpoint = `${basePath}/by-application-id/${encodeURIComponent(appId)}`
+      const response = await fetch(apiUrl(endpoint), { headers: authHeader })
+      const data = await response.json().catch(() => ({}))
+      if (response.ok && data.success !== false) {
+        const row = data.data ?? data.application ?? data
+        const id = String(row?.id ?? '').trim()
+        if (id) return id
+      }
+    } catch {
+      continue
+    }
+  }
+  return ''
+}
 
 function SubmissionAnswers({ formValues }) {
   const stepsWithFields = useMemo(() => {
@@ -158,24 +226,61 @@ function SubmittedApplicationsPage() {
       return {}
     }
   })()
+  migrateApplicantDraftStorage(authSession)
   const userEmail = authSession?.email ?? ''
   const authToken = String(authSession?.token ?? '').trim()
 
+  const applicantScope = useMemo(
+    () =>
+      getApplicantStorageScope({
+        userId: authSession?.userId,
+        id: authSession?.id,
+        email: authSession?.email,
+        token: authToken,
+      }),
+    [authSession?.userId, authSession?.id, authSession?.email, authToken],
+  )
+
+  const submissionsPersistKey = useMemo(() => submissionsStorageKey(applicantScope), [applicantScope])
+
   const submissions = useMemo(() => {
     try {
-      const raw = JSON.parse(window.localStorage.getItem(SUBMISSIONS_KEY) ?? '[]')
-      const all = Array.isArray(raw) ? raw : []
-      return all.filter((item) => item.userEmail === userEmail)
+      const scopedRaw = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
+      const legacyRaw = JSON.parse(window.localStorage.getItem(LEGACY_SUBMISSIONS_KEY) ?? '[]')
+      const scoped = Array.isArray(scopedRaw) ? scopedRaw : []
+      const legacy = Array.isArray(legacyRaw) ? legacyRaw : []
+      const byId = new Map()
+      for (const item of legacy) {
+        if (item?.id && item.userEmail === userEmail) {
+          byId.set(item.id, item)
+        }
+      }
+      for (const item of scoped) {
+        if (item?.id && item.userEmail === userEmail) {
+          byId.set(item.id, item)
+        }
+      }
+      return [...byId.values()].sort((a, b) => {
+        const ta = new Date(a.submittedAt || 0).getTime()
+        const tb = new Date(b.submittedAt || 0).getTime()
+        return tb - ta
+      })
     } catch {
       return []
     }
-  }, [userEmail])
+  }, [submissionsPersistKey, userEmail])
 
   const [selectedSubmissionId, setSelectedSubmissionId] = useState(submissions[0]?.id ?? '')
   const selectedSubmission = submissions.find((item) => item.id === selectedSubmissionId) ?? submissions[0] ?? null
   const [apiDocuments, setApiDocuments] = useState([])
   const [apiDocumentsLoading, setApiDocumentsLoading] = useState(false)
   const [apiDocumentsError, setApiDocumentsError] = useState('')
+  const fileReplaceRef = useRef(null)
+  const [resolvedRowId, setResolvedRowId] = useState('')
+  const [documentsRefreshKey, setDocumentsRefreshKey] = useState(0)
+  const [pendingUploadDocumentType, setPendingUploadDocumentType] = useState('')
+  const [replaceBusy, setReplaceBusy] = useState(false)
+  const [replaceNotice, setReplaceNotice] = useState('')
 
   function getAuthHeader() {
     return authToken ? { Authorization: `Bearer ${authToken}` } : {}
@@ -183,6 +288,105 @@ function SubmittedApplicationsPage() {
 
   function buildApplicationsPaths() {
     return ['/api/v1/applications', '/api/applications', '/applications', '/application']
+  }
+
+  useEffect(() => {
+    if (!selectedSubmission || !authToken) {
+      setResolvedRowId('')
+      return undefined
+    }
+
+    const cached = String(selectedSubmission.applicationRowId || '').trim()
+    if (cached) {
+      setResolvedRowId(cached)
+      return undefined
+    }
+
+    let cancelled = false
+    ;(async () => {
+      const rowId = await fetchApplicationRowIdByApplicationId(
+        selectedSubmission.id,
+        getAuthHeader(),
+        buildApplicationsPaths(),
+      )
+      if (!cancelled) setResolvedRowId(rowId)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedSubmission, authToken])
+
+  async function postSubmittedDocumentUpload(rowId, documentType, file) {
+    const paths = buildApplicationsPaths()
+    let lastError = null
+    const headers = getAuthHeader()
+
+    for (const basePath of paths) {
+      const endpoint = `${basePath}/${encodeURIComponent(rowId)}/document/upload?documentType=${encodeURIComponent(documentType)}`
+      const formData = new FormData()
+      formData.append('file', file)
+      try {
+        const response = await fetch(apiUrl(endpoint), {
+          method: 'POST',
+          headers,
+          body: formData,
+        })
+        const data = await response.json().catch(() => ({}))
+        if (response.ok && data.success !== false) {
+          return String(data?.data?.storedPath || '')
+        }
+        if (response.status === 404) {
+          lastError = new Error(data.message || 'Upload endpoint not found.')
+          continue
+        }
+        throw new Error(data.message || 'Failed to upload document.')
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error('Upload failed.')
+      }
+    }
+
+    throw lastError || new Error('Document upload failed.')
+  }
+
+  function handleReplaceDocumentClick(doc) {
+    const uploadType = resolveUploadDocumentType(doc)
+    if (!uploadType) {
+      setReplaceNotice('This document cannot be replaced automatically. Use Document in the menu if needed.')
+      return
+    }
+    if (!resolvedRowId) {
+      setReplaceNotice('Could not resolve your application on the server yet. Try again in a moment.')
+      return
+    }
+    if (!authToken) {
+      setReplaceNotice('Please sign in again to upload.')
+      return
+    }
+    setReplaceNotice('')
+    setPendingUploadDocumentType(uploadType)
+    window.requestAnimationFrame(() => fileReplaceRef.current?.click())
+  }
+
+  async function handleReplaceFileChange(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    const uploadType = pendingUploadDocumentType
+    setPendingUploadDocumentType('')
+    if (!file || !uploadType || !resolvedRowId) return
+
+    setReplaceBusy(true)
+    setReplaceNotice('')
+    try {
+      await postSubmittedDocumentUpload(resolvedRowId, uploadType, file)
+      setReplaceNotice('Document updated successfully.')
+      setDocumentsRefreshKey((n) => n + 1)
+      window.setTimeout(() => setReplaceNotice(''), 5000)
+    } catch (error) {
+      setReplaceNotice(error instanceof Error ? error.message : 'Upload failed.')
+    } finally {
+      setReplaceBusy(false)
+    }
   }
 
   useEffect(() => {
@@ -258,7 +462,7 @@ function SubmittedApplicationsPage() {
     return () => {
       cancelled = true
     }
-  }, [selectedSubmission, authToken])
+  }, [selectedSubmission, authToken, documentsRefreshKey])
 
   const displayedDocuments = apiDocuments.length > 0 ? apiDocuments : (selectedSubmission?.documents || [])
 
@@ -271,11 +475,14 @@ function SubmittedApplicationsPage() {
   }
 
   function handleLogout() {
+    const scope = getApplicantStorageScope({
+      userId: authSession?.userId,
+      id: authSession?.id,
+      email: authSession?.email,
+      token: authToken,
+    })
+    clearApplicantHydrationSessionFlags(scope)
     window.localStorage.removeItem('mucm-auth-session')
-    window.localStorage.removeItem('mucm-application-form')
-    window.localStorage.removeItem('mucm-current-step')
-    window.localStorage.removeItem('mucm-submitted-applications')
-    window.localStorage.removeItem('mucm-active-application')
     window.localStorage.removeItem('mucm-support-center-tab')
     navigate('/login')
   }
@@ -424,41 +631,79 @@ function SubmittedApplicationsPage() {
                             {apiDocumentsError}
                           </p>
                         ) : null}
+                        {replaceBusy ? (
+                          <p className="mt-2 text-xs text-[#0A1628]/55">Uploading replacement…</p>
+                        ) : null}
+                        {replaceNotice ? (
+                          <p
+                            className={`mt-2 rounded-lg border px-2.5 py-2 text-xs ${
+                              replaceNotice.includes('successfully')
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                : 'border-rose-200 bg-rose-50 text-rose-800'
+                            }`}
+                          >
+                            {replaceNotice}
+                          </p>
+                        ) : null}
+                        <input
+                          ref={fileReplaceRef}
+                          type="file"
+                          className="hidden"
+                          accept="application/pdf,image/*,.pdf,.doc,.docx"
+                          onChange={handleReplaceFileChange}
+                        />
                         <div className="mt-2 space-y-2">
-                          {displayedDocuments.map((doc) => (
-                            <div
-                              key={`${selectedSubmission.id}-${doc.key || doc.name || doc.label}`}
-                              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#0A1628]/8 bg-[#F8F7F4] px-3 py-2"
-                            >
-                              <div className="min-w-0">
-                                <p className="text-sm font-medium text-[#0A1628]/80">{doc.label}</p>
-                                <p className="text-xs text-[#0A1628]/50">
-                                  {doc.value ? doc.value : 'Not uploaded'}
-                                </p>
-                                {doc.url ? (
-                                  <a
-                                    href={doc.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="mt-1 inline-block text-xs font-medium text-[#b98a22] underline underline-offset-2 hover:text-[#8a6918]"
-                                  >
-                                    View uploaded document
-                                  </a>
-                                ) : null}
-                              </div>
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
-                                  doc.value
-                                    ? 'bg-green-100 text-green-700'
-                                    : doc.required
-                                      ? 'bg-red-100 text-red-700'
-                                      : 'bg-slate-100 text-slate-600'
-                                }`}
+                          {displayedDocuments.map((doc) => {
+                            const uploadType = resolveUploadDocumentType(doc)
+                            const canReplace =
+                              Boolean(uploadType && resolvedRowId && authToken)
+                            return (
+                              <div
+                                key={`${selectedSubmission.id}-${doc.key || doc.name || doc.label}`}
+                                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#0A1628]/8 bg-[#F8F7F4] px-3 py-2"
                               >
-                                {doc.value ? 'Uploaded' : doc.required ? 'Required Missing' : 'Optional'}
-                              </span>
-                            </div>
-                          ))}
+                                <div className="min-w-0">
+                                  <p className="text-sm font-medium text-[#0A1628]/80">{doc.label}</p>
+                                  <p className="text-xs text-[#0A1628]/50">
+                                    {doc.value ? doc.value : 'Not uploaded'}
+                                  </p>
+                                  {doc.url ? (
+                                    <a
+                                      href={doc.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="mt-1 inline-block text-xs font-medium text-[#b98a22] underline underline-offset-2 hover:text-[#8a6918]"
+                                    >
+                                      View uploaded document
+                                    </a>
+                                  ) : null}
+                                </div>
+                                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                                  {canReplace ? (
+                                    <button
+                                      type="button"
+                                      disabled={replaceBusy}
+                                      onClick={() => handleReplaceDocumentClick(doc)}
+                                      className="rounded-lg border border-[#D4A843]/50 bg-white px-2.5 py-1 text-xs font-semibold text-[#8a6918] shadow-sm transition hover:bg-[#fff8e8] disabled:pointer-events-none disabled:opacity-50"
+                                    >
+                                      {doc.value ? 'Replace document' : 'Upload document'}
+                                    </button>
+                                  ) : null}
+                                  <span
+                                    className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                      doc.value
+                                        ? 'bg-green-100 text-green-700'
+                                        : doc.required
+                                          ? 'bg-red-100 text-red-700'
+                                          : 'bg-slate-100 text-slate-600'
+                                    }`}
+                                  >
+                                    {doc.value ? 'Uploaded' : doc.required ? 'Required Missing' : 'Optional'}
+                                  </span>
+                                </div>
+                              </div>
+                            )
+                          })}
                         </div>
                       </div>
                     </div>

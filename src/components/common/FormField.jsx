@@ -37,7 +37,8 @@ function splitPhoneValue(raw) {
 function buildPhoneValue(countryCode, localNumber) {
   const safeCode = String(countryCode || '+1').trim() || '+1'
   const safeLocal = sanitizePhoneInput(localNumber ?? '').replace(/^\+/, '').trim()
-  return safeLocal ? `${safeCode} ${safeLocal}` : ''
+  // Keep dial code in form state when local digits are empty so splitPhoneValue does not fall back to +1.
+  return safeLocal ? `${safeCode} ${safeLocal}` : safeCode
 }
 
 function RadioOptionDescription({ text }) {

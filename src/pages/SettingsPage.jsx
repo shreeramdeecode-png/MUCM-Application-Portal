@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import PrimaryButton from '../components/common/PrimaryButton.jsx'
+import {
+  clearApplicantLocalDrafts,
+} from '../utils/applicantStorageKeys.js'
 
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
@@ -155,8 +158,13 @@ function SettingsPage() {
                 type="button"
                 onClick={() => {
                   if (window.confirm('This will delete all your saved progress. Are you sure?')) {
-                    window.localStorage.removeItem('mucm-application-form')
-                    window.localStorage.removeItem('mucm-current-step')
+                    let session = {}
+                    try {
+                      session = JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
+                    } catch {
+                      session = {}
+                    }
+                    clearApplicantLocalDrafts(session)
                     alert('Draft cleared.')
                   }
                 }}

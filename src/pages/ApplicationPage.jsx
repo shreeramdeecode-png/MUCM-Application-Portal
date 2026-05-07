@@ -30,12 +30,21 @@ import {
   sanitizeFaqHtml,
   searchFaqRows,
 } from '../utils/faqUtils.js'
+import {
+  activeApplicationStorageKey,
+  clearApplicantHydrationSessionFlags,
+  draftFormStorageKey,
+  draftStepStorageKey,
+  getApplicantStorageScope,
+  migrateApplicantDraftStorage,
+  submissionsStorageKey,
+} from '../utils/applicantStorageKeys.js'
+import { buildHydrationPatchFromFullApplication, normalizeSingleton } from '../utils/applicationApiHydration.js'
 
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
-const SUBMISSIONS_KEY = 'mucm-submitted-applications'
-const ACTIVE_APPLICATION_KEY = 'mucm-active-application'
 const SUBMIT_COOLDOWN_DAYS = Number(import.meta.env.VITE_APPLICATION_RESUBMIT_COOLDOWN_DAYS) || 30
+const EMPTY_ACTIVE_APPLICATION = Object.freeze({ id: '', applicationId: '' })
 const DOCUMENT_TYPE_BY_FIELD = {
   passport: 'passport',
   bankStatement: 'bankStatement',
@@ -168,12 +177,27 @@ function ApplicationPage() {
   const autoSaveTimerRef = useRef(null)
   const hasInitializedAutoSaveRef = useRef(false)
   const authSession = getAuthSession()
+  migrateApplicantDraftStorage(authSession)
   const userEmail = authSession?.email ?? ''
   const authToken = String(authSession?.token ?? '').trim()
   const portalUserId =
     String(authSession?.userId ?? '').trim() ||
     String(authSession?.id ?? '').trim() ||
     decodeJwtSub(authToken)
+  const applicantScope = useMemo(
+    () =>
+      getApplicantStorageScope({
+        userId: authSession?.userId,
+        id: authSession?.id,
+        email: authSession?.email,
+        token: authToken,
+      }),
+    [authSession?.userId, authSession?.id, authSession?.email, authToken],
+  )
+  const formPersistKey = useMemo(() => draftFormStorageKey(applicantScope), [applicantScope])
+  const stepPersistKey = useMemo(() => draftStepStorageKey(applicantScope), [applicantScope])
+  const activeAppPersistKey = useMemo(() => activeApplicationStorageKey(applicantScope), [applicantScope])
+  const submissionsPersistKey = useMemo(() => submissionsStorageKey(applicantScope), [applicantScope])
   const { options: dynOptions, programs: dynPrograms, docRequirements: dynDocRequirements, loading: dynLoading } = useDropdownOptions()
   const dynamicSteps = useMemo(() => buildApplicationSteps(dynOptions, dynPrograms, dynDocRequirements), [dynOptions, dynPrograms, dynDocRequirements])
 
@@ -189,14 +213,36 @@ function ApplicationPage() {
   }, [dynamicSteps])
 
   const [activeModule, setActiveModule] = useState('Application form')
-  const [currentStepIndex, setCurrentStepIndex] = usePersistentState(
-    'mucm-current-step',
-    0,
-  )
-  const [formValues, setFormValues] = usePersistentState(
-    'mucm-application-form',
-    initialForm,
-  )
+  const [currentStepIndex, setCurrentStepIndex] = usePersistentState(stepPersistKey, 0)
+  const [formValues, setFormValues] = usePersistentState(formPersistKey, initialForm)
+  const formValuesRef = useRef(formValues)
+  formValuesRef.current = formValues
+
+  useEffect(() => {
+    if (dynDocRequirements.length === 0) return
+    const LEGACY_DOCUMENT_FIELD_ALIASES = {
+      passports: 'passport',
+    }
+    setFormValues((prev) => {
+      let next = prev
+      let changed = false
+      for (const [legacyKey, canonicalKey] of Object.entries(LEGACY_DOCUMENT_FIELD_ALIASES)) {
+        const legacyVal = prev[legacyKey]
+        const canonVal = prev[canonicalKey]
+        if (
+          legacyVal != null &&
+          String(legacyVal).trim() !== '' &&
+          (canonVal == null || String(canonVal).trim() === '')
+        ) {
+          if (!changed) next = { ...prev }
+          changed = true
+          next[canonicalKey] = legacyVal
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [dynDocRequirements.length, setFormValues])
+
   const [validationErrors, setValidationErrors] = useState({})
   const [formError, setFormError] = useState('')
   const [draftNotice, setDraftNotice] = useState('')
@@ -230,13 +276,11 @@ function ApplicationPage() {
     open: false,
   })
   const [activeApplication, setActiveApplication] = usePersistentState(
-    ACTIVE_APPLICATION_KEY,
-    {
-      id: '',
-      applicationId: '',
-    },
+    activeAppPersistKey,
+    EMPTY_ACTIVE_APPLICATION,
   )
   const applicationsPrefixRef = useRef(import.meta.env.VITE_APPLICATIONS_PREFIX || '/api/v1/applications')
+  const hydratedApplicationRowRef = useRef('')
 
   function getAuthHeader() {
     if (authToken) {
@@ -354,6 +398,12 @@ function ApplicationPage() {
     return value
   }
 
+  /** Empty string breaks Postgres DATE columns via Sequelize ("Invalid date"); omit as null instead. */
+  function optionalDateForApi(value) {
+    const s = normalizeText(value)
+    return s === '' ? null : s
+  }
+
   function yesNoToBoolean(value) {
     if (value === 'Yes') return true
     if (value === 'No') return false
@@ -428,7 +478,8 @@ function ApplicationPage() {
   }
 
   async function upsertSingletonSection(applicationRowId, pathSegment, payload, existingRow) {
-    const rowId = existingRow?.id
+    const normalized = normalizeSingleton(existingRow)
+    const rowId = normalized?.id
     if (rowId) {
       await requestApplicationApi('PUT', `/${applicationRowId}/${pathSegment}/${rowId}`, payload)
       return
@@ -473,6 +524,22 @@ function ApplicationPage() {
       if (rowToDelete?.id) {
         await requestApplicationApi('DELETE', `/${applicationRowId}/${pathSegment}/${rowToDelete.id}`)
       }
+    }
+  }
+
+  function buildDocumentsSectionPayload(values) {
+    return {
+      upload_progress: true,
+      passport: normalizeText(values.passport),
+      bank_statement: normalizeText(values.bankStatement),
+      premedical_Bachelor_ug_HSC_Certificate: normalizeText(values.preMedTranscript),
+      Secondary_11grade: normalizeText(values.grade11Transcript),
+      cv_resume: normalizeText(values.cv),
+      passport_photo: normalizeText(values.passportPhoto),
+      other_professional_transcripts: normalizeText(values.otherProfessionalTranscripts),
+      exam_results_marksheet: normalizeText(values.examResults),
+      sponsor_signed_financial_form: normalizeText(values.sponsorSignedFinancialForm),
+      review_signature_document: normalizeText(values.reviewSignatureUpload),
     }
   }
 
@@ -540,14 +607,14 @@ function ApplicationPage() {
         surname: normalizeText(formValues.surname),
         preferred_name: normalizeText(formValues.preferredName),
         pronouns: normalizeText(formValues.pronouns),
-        date_of_birth: normalizeText(formValues.dateOfBirth),
+        date_of_birth: optionalDateForApi(formValues.dateOfBirth),
         gender: normalizeText(formValues.gender),
         name_change: normalizeText(formValues.nameChanged),
         ethnicity_race: normalizeText(formValues.ethnicity),
         nationality_citizenship: normalizeText(formValues.citizenship),
         country_of_residence: normalizeText(formValues.countryOfResidence),
         passport_number: normalizeText(formValues.passportNumber),
-        passport_expiry_date: normalizeText(formValues.passportExpiry),
+        passport_expiry_date: optionalDateForApi(formValues.passportExpiry),
         visa_immigration_status: normalizeText(formValues.visaStatus),
         email: normalizeText(formValues.email),
         mobile_phone: normalizeText(formValues.phoneMobile),
@@ -618,18 +685,7 @@ function ApplicationPage() {
         referral_description: normalizeText(formValues.referralDescription),
       },
       experiences: experienceRows,
-      documents: {
-        upload_progress: true,
-        passport: normalizeText(formValues.passport),
-        bank_statement: normalizeText(formValues.bankStatement),
-        premedical_Bachelor_ug_HSC_Certificate: normalizeText(formValues.preMedTranscript),
-        Secondary_11grade: normalizeText(formValues.grade11Transcript),
-        cv_resume: normalizeText(formValues.cv),
-        passport_photo: normalizeText(formValues.passportPhoto),
-        other_professional_transcripts: normalizeText(formValues.otherProfessionalTranscripts),
-        exam_results_marksheet: normalizeText(formValues.examResults),
-        sponsor_signed_financial_form: normalizeText(formValues.sponsorSignedFinancialForm),
-      },
+      documents: buildDocumentsSectionPayload(formValues),
       financialSupport: {
         student_full_name: normalizeText(formValues.studentName),
         student_id: normalizeText(formValues.studentId),
@@ -665,9 +721,9 @@ function ApplicationPage() {
         hasLoanApproval: Boolean(formValues.hasLoanApproval),
         certifyAccurate: Boolean(formValues.certifyAccurate),
         certifyFinancialResponsibility: Boolean(formValues.certifyFinancialResponsibility),
-        certifyDate: normalizeText(formValues.certifyDate),
+        certifyDate: optionalDateForApi(formValues.certifyDate),
         sponsorCertifySupport: Boolean(formValues.sponsorCertifySupport),
-        sponsorCertifyDate: normalizeText(formValues.sponsorCertifyDate),
+        sponsorCertifyDate: optionalDateForApi(formValues.sponsorCertifyDate),
         studentSignatureMethod: normalizeText(formValues.studentSignatureMethod),
         studentSignatureTyped: normalizeText(formValues.studentSignatureTyped),
         studentSignatureUpload: normalizeText(formValues.studentSignatureUpload),
@@ -802,7 +858,7 @@ function ApplicationPage() {
 
   function evaluateSubmitCooldown() {
     try {
-      const allSubmissions = JSON.parse(window.localStorage.getItem(SUBMISSIONS_KEY) ?? '[]')
+      const allSubmissions = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
       const mySubmissions = (Array.isArray(allSubmissions) ? allSubmissions : []).filter(
         (item) => item.userEmail === userEmail && item.submittedAt,
       )
@@ -826,6 +882,42 @@ function ApplicationPage() {
       return { isBlocked: false, nextAllowedAt: null }
     }
   }
+
+  useEffect(() => {
+    if (!authToken || submitted) {
+      return undefined
+    }
+    const rowId = String(activeApplication?.id ?? '').trim()
+    if (!rowId) {
+      hydratedApplicationRowRef.current = ''
+      return undefined
+    }
+
+    hydratedApplicationRowRef.current = rowId
+
+    let cancelled = false
+
+    ;(async () => {
+      try {
+        const full = await fetchApplicationFullById(rowId)
+        if (cancelled) {
+          return
+        }
+        const { patch, suggestedStepIndex } = buildHydrationPatchFromFullApplication(full, dynamicSteps.length)
+        setFormValues((previous) => ({ ...previous, ...patch }))
+        if (suggestedStepIndex != null) {
+          setCurrentStepIndex(suggestedStepIndex)
+        }
+      } catch {
+        hydratedApplicationRowRef.current = ''
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      hydratedApplicationRowRef.current = ''
+    }
+  }, [authToken, submitted, activeApplication?.id, dynamicSteps.length])
 
   useEffect(() => {
     if (!draftNotice) {
@@ -1034,7 +1126,7 @@ function ApplicationPage() {
   }, [formValues, dynamicSteps])
   const submittedApplications = useMemo(() => {
     try {
-      const raw = JSON.parse(window.localStorage.getItem(SUBMISSIONS_KEY) ?? '[]')
+      const raw = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
       const all = Array.isArray(raw) ? raw : []
       return all.filter((item) => item.userEmail === userEmail)
     } catch {
@@ -1109,7 +1201,9 @@ function ApplicationPage() {
   async function uploadApplicationDocumentField(fieldName, file) {
     const documentType = DOCUMENT_TYPE_BY_FIELD[fieldName]
     if (!documentType) {
-      return file?.name || ''
+      throw new Error(
+        `This upload slot is not linked to the server ("${fieldName}"). Refresh the page or contact support.`,
+      )
     }
 
     const stepIndex = dynamicSteps.findIndex((step) => step.id === 'documents')
@@ -1136,7 +1230,26 @@ function ApplicationPage() {
         const data = await response.json().catch(() => ({}))
         if (response.ok && data.success !== false) {
           applicationsPrefixRef.current = basePath
-          return String(data?.data?.storedPath || '')
+          const storedPath = String(data?.data?.storedPath || '').trim()
+          if (!storedPath) {
+            throw new Error('Upload succeeded but the server did not return a stored file path.')
+          }
+          const mergedValues = { ...formValuesRef.current, [fieldName]: storedPath }
+          try {
+            const fullApplication = await fetchApplicationFullById(rowId)
+            await upsertSingletonSection(
+              rowId,
+              'document',
+              buildDocumentsSectionPayload(mergedValues),
+              fullApplication.document,
+            )
+          } catch (syncErr) {
+            console.warn('Document file uploaded but saving document metadata failed:', syncErr)
+            throw syncErr instanceof Error
+              ? syncErr
+              : new Error('File uploaded but could not save document details to your application.')
+          }
+          return storedPath
         }
         if (response.status === 404) {
           lastError = new Error(data.message || 'Document upload endpoint not found.')
@@ -1459,13 +1572,6 @@ function ApplicationPage() {
     setFormError('')
     const nextStepIndex = Math.min(currentStepIndex + 1, dynamicSteps.length - 1)
     try {
-      // Explicit checkpoint save on every Save & Continue click.
-      window.localStorage.setItem('mucm-application-form', JSON.stringify(formValues))
-      window.localStorage.setItem('mucm-current-step', JSON.stringify(nextStepIndex))
-    } catch {
-      // ignore quota / private mode
-    }
-    try {
       const meta = await persistApplication({ stepIndex: nextStepIndex, isComplete: false })
       await syncApplicationSections(meta.id)
       setCurrentStepIndex(nextStepIndex)
@@ -1515,12 +1621,6 @@ function ApplicationPage() {
   }
 
   async function handleSaveDraft() {
-    try {
-      window.localStorage.setItem('mucm-application-form', JSON.stringify(formValues))
-      window.localStorage.setItem('mucm-current-step', JSON.stringify(currentStepIndex))
-    } catch {
-      // ignore quota / private mode
-    }
     try {
       const meta = await persistApplication({ stepIndex: currentStepIndex, isComplete: false })
       await syncApplicationSections(meta.id)
@@ -1609,10 +1709,10 @@ function ApplicationPage() {
       })),
     }
     try {
-      const existing = JSON.parse(window.localStorage.getItem(SUBMISSIONS_KEY) ?? '[]')
+      const existing = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
       const safeExisting = Array.isArray(existing) ? existing : []
       safeExisting.unshift(submittedRecord)
-      window.localStorage.setItem(SUBMISSIONS_KEY, JSON.stringify(safeExisting))
+      window.localStorage.setItem(submissionsPersistKey, JSON.stringify(safeExisting))
     } catch {
       // ignore storage issues
     }
@@ -1621,17 +1721,19 @@ function ApplicationPage() {
     // Clear current draft so returning to /application starts a new blank form.
     setCurrentStepIndex(0)
     setFormValues(initialForm)
-    setActiveApplication({ id: '', applicationId: '' })
+    setActiveApplication({ ...EMPTY_ACTIVE_APPLICATION })
     setSubmitted(true)
   }
 
   function resetApplication() {
+    hydratedApplicationRowRef.current = ''
+    clearApplicantHydrationSessionFlags(applicantScope)
     setCurrentStepIndex(0)
     setFormValues(initialForm)
     setSubmitted(false)
     setSubmittedSnapshot(null)
     setLastSubmissionId('')
-    setActiveApplication({ id: '', applicationId: '' })
+    setActiveApplication({ ...EMPTY_ACTIVE_APPLICATION })
   }
 
   async function handleDownloadApplicationForm() {
@@ -1684,11 +1786,12 @@ function ApplicationPage() {
   }
 
   function handleLogout() {
+    const session = getAuthSession()
+    const scope = getApplicantStorageScope(session)
+    clearApplicantHydrationSessionFlags(scope)
+    // Do not clear draft/active-application keys here — same user expects progress after logging back in.
+    // Scoped storage keys already isolate drafts per account on shared browsers.
     window.localStorage.removeItem('mucm-auth-session')
-    window.localStorage.removeItem('mucm-application-form')
-    window.localStorage.removeItem('mucm-current-step')
-    window.localStorage.removeItem('mucm-submitted-applications')
-    window.localStorage.removeItem('mucm-active-application')
     window.localStorage.removeItem('mucm-support-center-tab')
     navigate('/login')
   }
