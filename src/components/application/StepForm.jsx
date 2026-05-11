@@ -211,6 +211,7 @@ function StepGroupPanel({
             return (
               <div
                 key={field.name}
+                data-mucm-field={field.name}
                 style={{ animationDelay: `${(groupIndex * 4 + fieldIndex) * 24}ms` }}
                 className={`animate-fade-in-up ${spanWide ? 'md:col-span-2 xl:col-span-3' : ''}`}
               >

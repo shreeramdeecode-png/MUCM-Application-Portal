@@ -13,6 +13,10 @@ import {
   migrateApplicantDraftStorage,
   submissionsStorageKey,
 } from '../utils/applicantStorageKeys.js'
+import { downloadApplicationSummaryPdf } from '../utils/applicationFormPdf.js'
+import { downloadPrefilledStep7Pdf } from '../utils/step7SponsorPdf.js'
+import { buildPdfSections } from '../utils/pdfDataBuilders.js'
+import { Download, FileText, Landmark } from 'lucide-react'
 
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
@@ -487,6 +491,26 @@ function SubmittedApplicationsPage() {
     navigate('/login')
   }
 
+  async function handleDownloadSummary(submission) {
+    if (!submission?.formValues) return
+    const sections = buildPdfSections(submission.formValues)
+    await downloadApplicationSummaryPdf({
+      referenceId: submission.id || 'mucm-application',
+      sections,
+    })
+  }
+
+  async function handleDownloadSponsorForm(submission) {
+    if (!submission?.formValues) return
+    const downloadLink = {
+      href: '/forms/mucm-step-7-sponsor-financial-declaration.pdf',
+      fileName: 'mucm-step-7-sponsor-financial-declaration.pdf',
+      label: 'Download Step 7 sponsor form (PDF)',
+      prefillFromValues: true,
+    }
+    await downloadPrefilledStep7Pdf(submission.formValues, downloadLink)
+  }
+
   return (
     <main className="min-h-screen bg-background">
       <header className="page-gutter-x border-b border-border bg-card/95 py-3 backdrop-blur-md lg:hidden">
@@ -561,21 +585,45 @@ function SubmittedApplicationsPage() {
                     {submissions.map((submission) => {
                       const isSelected = selectedSubmission?.id === submission.id
                       return (
-                        <button
+                        <div
                           key={submission.id}
-                          type="button"
-                          onClick={() => setSelectedSubmissionId(submission.id)}
-                          className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${
+                          className={`group relative w-full rounded-xl border transition-all duration-200 ${
                             isSelected
-                              ? 'border-[#D4A843]/65 bg-[#fff8e8] text-[#0A1628]'
-                              : 'border-border bg-white text-[#0A1628]/70 hover:border-[#D4A843]/35 hover:bg-[#F8F7F4]'
+                              ? 'border-[#D4A843]/65 bg-[#fff8e8] shadow-sm'
+                              : 'border-border bg-white hover:border-[#D4A843]/35 hover:bg-[#F8F7F4]'
                           }`}
                         >
-                          <p className="font-semibold">{submission.id}</p>
-                          <p className="mt-0.5 text-xs text-[#0A1628]/45">
-                            {new Date(submission.submittedAt).toLocaleString()}
-                          </p>
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSubmissionId(submission.id)}
+                            className="w-full px-3 py-2.5 text-left"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                <p className={`text-sm font-bold ${isSelected ? 'text-[#0A1628]' : 'text-[#0A1628]/80'}`}>
+                                  {submission.id}
+                                </p>
+                                <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wider text-[#0A1628]/40">
+                                  {new Date(submission.submittedAt).toLocaleDateString(undefined, {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    year: 'numeric',
+                                  })}
+                                </p>
+                              </div>
+                              <div
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  handleDownloadSummary(submission)
+                                }}
+                                title="Download Summary PDF"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#D4A843]/30 bg-white text-[#b98a22] shadow-sm transition-all hover:scale-110 hover:border-[#D4A843]/60 hover:bg-[#fff8e8] active:scale-95"
+                              >
+                                <Download className="h-4 w-4" strokeWidth={2.5} />
+                              </div>
+                            </div>
+                          </button>
+                        </div>
                       )
                     })}
                   </div>
@@ -618,6 +666,51 @@ function SubmittedApplicationsPage() {
                       </div>
 
                       <SubmissionAnswers formValues={selectedSubmission.formValues} />
+
+                      {/* Download Center */}
+                      <div className="mt-3 overflow-hidden rounded-xl border border-[#D4A843]/25 bg-gradient-to-br from-card via-secondary/40 to-[#fff8e8]/50 shadow-sm">
+                        <div className="border-b border-[#D4A843]/15 bg-[#D4A843]/5 px-4 py-2.5 sm:px-6">
+                          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#8a6918]/80">
+                            Download Center
+                          </p>
+                          <h4 className="mt-0.5 text-sm font-semibold text-[#0A1628] [font-family:'DM_Serif_Display',serif]">
+                            Export Application Documents
+                          </h4>
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 sm:p-5">
+
+                          {/* Sponsor Form Download (Conditional) */}
+                          {['B', 'C'].includes(selectedSubmission.formValues?.paymentOption) ? (
+                            <div className="group relative flex flex-col justify-between rounded-xl border border-border bg-card p-4 transition-all hover:border-[#D4A843]/40 hover:shadow-md">
+                              <div className="flex items-start gap-3">
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600 shadow-sm transition group-hover:bg-[#D4A843]/15 group-hover:text-[#b98a22]">
+                                  <Landmark className="h-5 w-5" strokeWidth={1.75} />
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-sm font-bold text-[#0A1628]">Sponsor Declaration</p>
+                                  <p className="mt-0.5 text-xs leading-relaxed text-[#0A1628]/50">
+                                    Prefilled Step 7 form for sponsor signature.
+                                  </p>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadSponsorForm(selectedSubmission)}
+                                className="mt-4 flex items-center justify-center gap-2 rounded-lg border border-[#D4A843]/45 bg-gradient-to-r from-[#D4A843]/12 to-[#D4A843]/5 px-4 py-2.5 text-sm font-semibold text-[#5c4510] shadow-sm transition hover:border-[#D4A843]/70 hover:from-[#D4A843]/18 hover:to-[#D4A843]/8"
+                              >
+                                <Download className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
+                                Download Sponsor Form (PDF)
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/30 p-4 text-center">
+                              <p className="text-xs font-medium text-[#0A1628]/35">
+                                Sponsor form not required for self-funded applications.
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
 
                       <div className="mt-3 rounded-xl border border-border bg-card p-3">
                         <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#0A1628]/40">

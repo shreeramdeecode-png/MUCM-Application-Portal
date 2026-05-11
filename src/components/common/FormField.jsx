@@ -292,6 +292,7 @@ function RepeatableBlock({ field, value, onChange, errors, onUploadActivityChang
               {(field.itemFields ?? []).map((sub) => (
                 <div
                   key={sub.name}
+                  data-mucm-field={`${field.name}__${rowIndex}__${sub.name}`}
                   className={sub.fullWidth ? 'sm:col-span-2' : ''}
                 >
                   <FormField

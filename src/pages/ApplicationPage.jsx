@@ -22,6 +22,7 @@ import { usePersistentState } from '../hooks/usePersistentState.js'
 import { useDropdownOptions } from '../hooks/useDropdownOptions.js'
 import { getAutofillStudentInfo } from '../utils/studentInfoAutofill.js'
 import { downloadApplicationSummaryPdf } from '../utils/applicationFormPdf.js'
+import { buildPdfSections } from '../utils/pdfDataBuilders.js'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
 import { getSelectValues, isFieldVisible } from '../utils/formVisibility.js'
 import {
@@ -1470,6 +1471,67 @@ function ApplicationPage() {
     return stepErrors
   }
 
+  function escapeAttrSelector(value) {
+    const s = String(value ?? '')
+    return typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(s) : s
+  }
+
+  function focusFirstFocusable(container) {
+    if (!container || typeof container.querySelector !== 'function') return
+    const focusable = container.querySelector(
+      'input:not([type="hidden"]):not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[role="combobox"]',
+    )
+    focusable?.focus?.({ preventScroll: true })
+  }
+
+  function scrollFirstInvalidFieldIntoView(step, stepErrors, valuesForVisibility) {
+    if (!step || !stepErrors || Object.keys(stepErrors).length === 0) return
+
+    for (const field of step.fields) {
+      if (field.type === 'note' || String(field.name ?? '').startsWith('__')) continue
+      if (!isFieldVisible(field, valuesForVisibility)) continue
+
+      if (field.type === 'repeatable') {
+        const prefix = `${field.name}__`
+        const matchingKeys = Object.keys(stepErrors).filter((k) => k.startsWith(prefix))
+        if (matchingKeys.length === 0) continue
+        matchingKeys.sort((a, b) => {
+          const pa = a.split('__')
+          const pb = b.split('__')
+          const ai = Number.parseInt(pa[1] ?? '', 10)
+          const bi = Number.parseInt(pb[1] ?? '', 10)
+          if (Number.isFinite(ai) && Number.isFinite(bi) && ai !== bi) return ai - bi
+          return a.localeCompare(b)
+        })
+        const targetKey = matchingKeys[0]
+        let el = document.querySelector(`[data-mucm-field="${escapeAttrSelector(targetKey)}"]`)
+        if (!el) {
+          el = document.querySelector(`[data-mucm-field="${escapeAttrSelector(field.name)}"]`)
+        }
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        focusFirstFocusable(el)
+        return
+      }
+
+      if (stepErrors[field.name]) {
+        const el = document.querySelector(`[data-mucm-field="${escapeAttrSelector(field.name)}"]`)
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        focusFirstFocusable(el)
+        return
+      }
+    }
+  }
+
+  function scheduleScrollToFirstInvalidField(step, stepErrors, valuesForVisibility) {
+    if (!step || Object.keys(stepErrors).length === 0) return
+    if (typeof window === 'undefined') return
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        scrollFirstInvalidFieldIntoView(step, stepErrors, valuesForVisibility)
+      })
+    })
+  }
+
   function updateField(name, value) {
     setFormValues((previous) => {
       const next = { ...previous, [name]: value }
@@ -1565,6 +1627,7 @@ function ApplicationPage() {
     if (Object.keys(stepErrors).length > 0) {
       setValidationErrors((previous) => ({ ...previous, ...stepErrors }))
       setFormError('Please fix the highlighted fields before continuing.')
+      scheduleScrollToFirstInvalidField(currentStep, stepErrors, formValues)
       return
     }
 
@@ -1612,6 +1675,9 @@ function ApplicationPage() {
       setValidationErrors((previous) => ({ ...previous, ...aggregateErrors }))
       setFormError('Please complete the current step before moving to the next one.')
       setCurrentStepIndex(firstInvalidStep)
+      const invalidStep = dynamicSteps[firstInvalidStep]
+      const errsForStep = validateStep(invalidStep, formValues)
+      scheduleScrollToFirstInvalidField(invalidStep, errsForStep, formValues)
       return
     }
 
@@ -1666,7 +1732,10 @@ function ApplicationPage() {
       setValidationErrors(allErrors)
       setFormError('Please complete all required fields with valid values.')
       if (firstInvalidStep >= 0) {
+        const invalidStep = dynamicSteps[firstInvalidStep]
+        const errsForStep = validateStep(invalidStep, formValues)
         setCurrentStepIndex(firstInvalidStep)
+        scheduleScrollToFirstInvalidField(invalidStep, errsForStep, formValues)
       }
       return
     }
@@ -1738,52 +1807,14 @@ function ApplicationPage() {
 
   async function handleDownloadApplicationForm() {
     const valuesForPdf = submitted && submittedSnapshot ? submittedSnapshot : formValues
-    const sections = []
-    dynamicSteps
-      .filter((step) => step.id !== 'reviewSubmit')
-      .forEach((step) => {
-        const visibleFields = step.fields.filter(
-          (field) =>
-            field.type !== 'note' &&
-            !String(field.name ?? '').startsWith('__') &&
-            isFieldVisible(field, valuesForPdf),
-        )
-        if (visibleFields.length === 0) return
-
-        const entries = []
-        visibleFields.forEach((field) => {
-          if (field.type === 'repeatable') {
-            const items = Array.isArray(valuesForPdf[field.name]) ? valuesForPdf[field.name] : []
-            const itemLines = []
-            if (items.length === 0) {
-              itemLines.push('No entries')
-            } else {
-              items.forEach((row, idx) => {
-                itemLines.push(`${field.itemBadge ?? 'Item'} ${idx + 1}`)
-                ;(field.itemFields ?? []).forEach((sub) => {
-                  itemLines.push(`  ${sub.label ?? sub.name}: ${getSingleFieldDisplayValue(sub, row?.[sub.name])}`)
-                })
-              })
-            }
-            entries.push({
-              label: field.sectionTitle ?? field.label ?? field.name,
-              value: itemLines.join('\n'),
-            })
-          } else {
-            entries.push({
-              label: field.label,
-              value: getSingleFieldDisplayValue(field, valuesForPdf[field.name]),
-            })
-          }
-        })
-        sections.push({ title: step.title, entries })
-      })
+    const sections = buildPdfSections(valuesForPdf, dynamicSteps)
 
     await downloadApplicationSummaryPdf({
       referenceId: lastSubmissionId || 'mucm-application',
       sections,
     })
   }
+
 
   function handleLogout() {
     const session = getAuthSession()
@@ -2640,7 +2671,85 @@ function ApplicationPage() {
             </div>
           </div>
 
-          <p className="mt-6 text-sm text-[#0A1628]/52">
+          {/* Download Center */}
+          <div className="mx-auto mt-8 max-w-2xl overflow-hidden rounded-2xl border border-[#D4A843]/25 bg-gradient-to-br from-card via-secondary/40 to-[#fff8e8]/50 text-left shadow-lg">
+            <div className="border-b border-[#D4A843]/15 bg-[#D4A843]/5 px-5 py-4 sm:px-6">
+              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#8a6918]/80">
+                Download Center
+              </p>
+              <h4 className="mt-0.5 text-lg font-semibold text-[#0A1628] [font-family:'DM_Serif_Display',serif]">
+                Export Application Documents
+              </h4>
+              <p className="text-xs text-[#0A1628]/50">
+                Download copies of your official submission records.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2 sm:p-6">
+              {/* Application Summary Download */}
+              <div className="group relative flex flex-col justify-between rounded-xl border border-border bg-card p-4 transition-all hover:border-[#D4A843]/40 hover:shadow-md">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600 shadow-sm transition group-hover:bg-[#D4A843]/15 group-hover:text-[#b98a22]">
+                    <FileText className="h-5 w-5" strokeWidth={1.75} />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-[#0A1628]">Application Summary</p>
+                    <p className="mt-0.5 text-xs leading-relaxed text-[#0A1628]/50">
+                      Complete submission snapshot with all fields and answers.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDownloadApplicationForm}
+                  className="mt-4 flex items-center justify-center gap-2 rounded-lg border border-[#D4A843]/45 bg-gradient-to-r from-[#D4A843]/12 to-[#D4A843]/5 px-4 py-2.5 text-sm font-semibold text-[#5c4510] shadow-sm transition hover:border-[#D4A843]/70 hover:from-[#D4A843]/18 hover:to-[#D4A843]/8"
+                >
+                  <Download className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
+                  Download Summary (PDF)
+                </button>
+              </div>
+
+              {/* Sponsor Form Download (Conditional) */}
+              {['B', 'C'].includes(submittedSnapshot?.paymentOption) ? (
+                <div className="group relative flex flex-col justify-between rounded-xl border border-border bg-card p-4 transition-all hover:border-[#D4A843]/40 hover:shadow-md">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600 shadow-sm transition group-hover:bg-[#D4A843]/15 group-hover:text-[#b98a22]">
+                      <Landmark className="h-5 w-5" strokeWidth={1.75} />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-[#0A1628]">Sponsor Declaration</p>
+                      <p className="mt-0.5 text-xs leading-relaxed text-[#0A1628]/50">
+                        Prefilled Step 7 form for sponsor signature.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const downloadLink = {
+                        href: '/forms/mucm-step-7-sponsor-financial-declaration.pdf',
+                        fileName: 'mucm-step-7-sponsor-financial-declaration.pdf',
+                        label: 'Download Step 7 sponsor form (PDF)',
+                        prefillFromValues: true,
+                      }
+                      import('../utils/step7SponsorPdf.js').then(m => m.downloadPrefilledStep7Pdf(submittedSnapshot, downloadLink))
+                    }}
+                    className="mt-4 flex items-center justify-center gap-2 rounded-lg border border-[#D4A843]/45 bg-gradient-to-r from-[#D4A843]/12 to-[#D4A843]/5 px-4 py-2.5 text-sm font-semibold text-[#5c4510] shadow-sm transition hover:border-[#D4A843]/70 hover:from-[#D4A843]/18 hover:to-[#D4A843]/8"
+                  >
+                    <Download className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
+                    Download Sponsor Form (PDF)
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/30 p-4 text-center">
+                  <p className="text-xs font-medium text-[#0A1628]/35">
+                    Sponsor form not required for self-funded applications.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <p className="mt-8 text-sm text-[#0A1628]/52">
             Questions? Contact us at{' '}
             <a className="font-semibold text-[#b98a22] hover:text-[#9f741a]" href="mailto:admissions@muantigua.org">
               admissions@muantigua.org
@@ -2651,10 +2760,7 @@ function ApplicationPage() {
             </a>
           </p>
 
-          <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
-            <PrimaryButton variant="outline" type="button" onClick={handleDownloadApplicationForm}>
-              Download Application Form
-            </PrimaryButton>
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
             <PrimaryButton
               variant="outline"
               type="button"
@@ -2666,6 +2772,7 @@ function ApplicationPage() {
               Start New Application
             </PrimaryButton>
           </div>
+
         </section>
       ) : (
         <div className="grid min-h-screen grid-cols-1 lg:h-[100dvh] lg:min-h-0 lg:grid-cols-[320px_minmax(0,1fr)] lg:overflow-hidden">
