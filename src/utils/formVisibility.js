@@ -1,3 +1,5 @@
+import { isTransferMdProgram } from './programTypes.js'
+
 function matchCondition(condition, values) {
   const value = values[condition.field]
   if (condition.equals !== undefined) {
@@ -41,4 +43,45 @@ export function normalizeSelectOptions(options) {
 
 export function getSelectValues(options) {
   return normalizeSelectOptions(options).map((o) => String(o.value))
+}
+
+export function rowHasValues(row) {
+  if (!row || typeof row !== 'object') return false
+  return Object.values(row).some(
+    (value) => value !== undefined && value !== null && String(value).trim() !== '',
+  )
+}
+
+/** Repeatable rows that contain at least one non-empty sub-field. */
+export function getRepeatableDisplayRows(field, values) {
+  const items = Array.isArray(values?.[field.name]) ? values[field.name] : []
+  return items.filter(rowHasValues)
+}
+
+/**
+ * Read-only review / PDF visibility: normal rules, plus saved repeatables (e.g. transfer credits)
+ * when programType codes from the API do not match static showWhen anyOf lists.
+ */
+export function isFieldVisibleForSubmissionReview(field, values, options = {}) {
+  if (field.type === 'note' || String(field.name ?? '').startsWith('__')) {
+    return false
+  }
+  if (isFieldVisible(field, values)) {
+    return true
+  }
+
+  const programOptions = options.programOptions ?? []
+
+  if (field.name === 'transferCredits') {
+    if (isTransferMdProgram(values?.programType, programOptions)) {
+      return true
+    }
+    return getRepeatableDisplayRows(field, values).length > 0
+  }
+
+  if (field.type === 'repeatable' && getRepeatableDisplayRows(field, values).length > 0) {
+    return true
+  }
+
+  return false
 }

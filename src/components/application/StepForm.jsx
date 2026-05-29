@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import FormField from '../common/FormField.jsx'
 import PrimaryButton from '../common/PrimaryButton.jsx'
-import { isFieldVisible } from '../../utils/formVisibility.js'
+import {
+  getRepeatableDisplayRows,
+  isFieldVisible,
+  isFieldVisibleForSubmissionReview,
+} from '../../utils/formVisibility.js'
+import { isFieldValueEmpty } from '../../utils/formValidation.js'
+import { isTransferMdProgram } from '../../utils/programTypes.js'
+import SignatureReviewValue, {
+  getSignatureImageSrc,
+  isSignatureTypedField,
+  isSignatureUploadField,
+} from '../common/SignatureReviewValue.jsx'
 import { getSingleFieldDisplayValue } from '../../utils/submissionDisplay.js'
 import {
   AlertCircle,
@@ -190,6 +201,7 @@ function StepGroupPanel({
             field={noteFieldForForm}
             value={values[group.noteField.name]}
             error={errors[group.noteField.name]}
+            allErrors={errors}
             onChange={onChange}
             onUploadActivityChange={onUploadActivityChange}
             allValues={values}
@@ -219,6 +231,7 @@ function StepGroupPanel({
                   field={field}
                   value={values[field.name]}
                   error={errors[field.name]}
+                  allErrors={errors}
                   onChange={onChange}
                   onFileUpload={onFileUpload}
                   onUploadActivityChange={onUploadActivityChange}
@@ -234,13 +247,23 @@ function StepGroupPanel({
 }
 
 function isValueMissing(field, rawValue) {
-  if (field.type === 'checkbox') {
-    return !rawValue
+  return isFieldValueEmpty(field, rawValue)
+}
+
+function renderReviewFieldValue(field, rawValue) {
+  if (isSignatureTypedField(field) || isSignatureUploadField(field)) {
+    return <SignatureReviewValue field={field} value={rawValue} align="right" />
   }
-  if (field.type === 'repeatable') {
-    return !Array.isArray(rawValue) || rawValue.length === 0
+
+  if (field.type === 'file' && getSignatureImageSrc(rawValue)) {
+    return <SignatureReviewValue field={field} value={rawValue} align="right" compact />
   }
-  return rawValue === undefined || rawValue === null || rawValue === ''
+
+  return (
+    <p className="text-sm font-medium leading-snug text-foreground sm:text-right">
+      {getSingleFieldDisplayValue(field, rawValue)}
+    </p>
+  )
 }
 
 /**
@@ -252,7 +275,7 @@ function isValueMissing(field, rawValue) {
  * Section order follows first occurrence in the step; field order within a section follows
  * the step definition.
  */
-function buildReviewSubsectionGroups(reviewStep, values) {
+function buildReviewSubsectionGroups(reviewStep, values, reviewOptions = {}) {
   const rows = []
   let lastNoteTitle = null
 
@@ -264,7 +287,7 @@ function buildReviewSubsectionGroups(reviewStep, values) {
       continue
     }
     if (String(field.name ?? '').startsWith('__')) continue
-    if (!isFieldVisible(field, values)) continue
+    if (!isFieldVisibleForSubmissionReview(field, values, reviewOptions)) continue
 
     let subheading = field.section ?? null
     if (!subheading && field.type === 'repeatable') {
@@ -315,6 +338,7 @@ function StepForm({
   canGoBack,
   isLastStep,
   onSubmit,
+  isSubmitting = false,
   isLoadingStep = false,
 }) {
   // 0% on first step, 100% on final step (stepNumber is 1-based for display only).
@@ -325,9 +349,33 @@ function StepForm({
     setUploadActivityCount((c) => Math.max(0, c + delta))
   }, [])
 
+  const programTypeField = step.fields.find((f) => f.name === 'programType')
+  const programTypeOptions = programTypeField?.options ?? []
+  const transferCreditsField = step.fields.find((f) => f.name === 'transferCredits')
+
   useEffect(() => {
     setUploadActivityCount(0)
   }, [step.id])
+
+  function handleFieldChange(name, value) {
+    onChange(name, value)
+    if (name === 'programType' && isTransferMdProgram(value, programTypeOptions)) {
+      if (!Array.isArray(values.transferCredits) || values.transferCredits.length === 0) {
+        const blank = transferCreditsField?.defaultItem ?? { institution: '', courses: '' }
+        onChange(
+          'transferCredits',
+          [typeof structuredClone === 'function' ? structuredClone(blank) : { ...blank }],
+        )
+      }
+      if (typeof window !== 'undefined') {
+        window.requestAnimationFrame(() => {
+          document
+            .querySelector('[data-mucm-field="transferCredits"]')
+            ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        })
+      }
+    }
+  }
 
   useEffect(() => {
     // Clear subProgram if it's not valid for the currently selected program.
@@ -365,9 +413,12 @@ function StepForm({
         (field) => field.type !== 'note' && !String(field.name ?? '').startsWith('__') && isFieldVisible(field, values),
       )
 
-      const hasMissingRequired = visibleFields.some(
-        (field) => field.required && isValueMissing(field, values[field.name]),
-      )
+      const hasMissingRequired = visibleFields.some((field) => {
+        if (stepDef.id === 'documents' && field.type === 'file') {
+          return false
+        }
+        return field.required && isValueMissing(field, values[field.name])
+      })
       if (hasMissingRequired) {
         return false
       }
@@ -396,9 +447,6 @@ function StepForm({
         ),
       )
     : []
-  const missingRequiredCount = reviewFields.filter(
-    (field) => field.required && isValueMissing(field, values[field.name]),
-  ).length
   const missingNonDocumentRequired = reviewFields.filter(
     (field) =>
       field.required &&
@@ -431,7 +479,7 @@ function StepForm({
     : 0
 
   const cannotSubmitApplication =
-    isLastStep && (missingRequiredCount > 0 || reviewStepFieldsMissing > 0)
+    isLastStep && (missingNonDocumentRequired > 0 || reviewStepFieldsMissing > 0)
 
   const stepPageVertical = isReviewStep
     ? 'py-3 sm:py-4 lg:py-5'
@@ -670,7 +718,9 @@ function StepForm({
             </div>
 
             {priorSteps.map((reviewStep, reviewIndex) => {
-              const subsectionGroups = buildReviewSubsectionGroups(reviewStep, values)
+              const subsectionGroups = buildReviewSubsectionGroups(reviewStep, values, {
+                programOptions: programTypeOptions,
+              })
 
               return (
                 <div
@@ -738,8 +788,8 @@ function StepForm({
                                         {repeatableLabel}
                                       </p>
                                     ) : null}
-                                    {Array.isArray(values[field.name]) && values[field.name].length > 0 ? (
-                                      values[field.name].map((row, rowIndex) => (
+                                    {getRepeatableDisplayRows(field, values).length > 0 ? (
+                                      getRepeatableDisplayRows(field, values).map((row, rowIndex) => (
                                         <div
                                           key={`${field.name}-row-${rowIndex}`}
                                           className="rounded-lg border border-border bg-muted/40 px-3 py-2.5"
@@ -775,22 +825,7 @@ function StepForm({
                                     <p className="text-sm font-semibold leading-snug text-muted-foreground">
                                       {field.label}
                                     </p>
-                                    {field.type === 'file' &&
-                                    typeof values[field.name] === 'string' &&
-                                    values[field.name].startsWith('data:image/') ? (
-                                      <div className="space-y-1.5 sm:text-right">
-                                        <p className="text-sm text-muted-foreground">Uploaded signature</p>
-                                        <img
-                                          src={values[field.name]}
-                                          alt=""
-                                          className="max-h-24 max-w-[240px] rounded-lg border border-border bg-card object-contain sm:ml-auto"
-                                        />
-                                      </div>
-                                    ) : (
-                                      <p className="text-sm font-medium leading-snug text-foreground sm:text-right">
-                                        {getSingleFieldDisplayValue(field, values[field.name])}
-                                      </p>
-                                    )}
+                                    {renderReviewFieldValue(field, values[field.name])}
                                   </div>
                                 )}
                               </div>
@@ -825,6 +860,7 @@ function StepForm({
                         field={noteFieldForForm}
                         value={values[group.noteField.name]}
                         error={errors[group.noteField.name]}
+                        allErrors={errors}
                         onChange={onChange}
                         onFileUpload={onFileUpload}
                         onUploadActivityChange={reportUploadActivity}
@@ -837,6 +873,7 @@ function StepForm({
                       {group.fields.map((field) => (
                         <div
                           key={field.name}
+                          data-mucm-field={field.name}
                           className={`animate-fade-in-up ${
                             field.fullWidth ||
                             field.type === 'checkbox' ||
@@ -852,6 +889,7 @@ function StepForm({
                             field={field}
                             value={values[field.name]}
                             error={errors[field.name]}
+                            allErrors={errors}
                             onChange={onChange}
                             onFileUpload={onFileUpload}
                             onUploadActivityChange={reportUploadActivity}
@@ -885,7 +923,7 @@ function StepForm({
               groupIndex={groupIndex}
               values={values}
               errors={errors}
-              onChange={onChange}
+              onChange={handleFieldChange}
               onFileUpload={onFileUpload}
               onUploadActivityChange={reportUploadActivity}
               animationDelay={groupIndex * 60}
@@ -922,8 +960,12 @@ function StepForm({
                 Draft
               </PrimaryButton>
               {isLastStep ? (
-                <PrimaryButton type="button" disabled={cannotSubmitApplication} onClick={onSubmit}>
-                  Submit Application
+                <PrimaryButton
+                  type="button"
+                  disabled={cannotSubmitApplication || isSubmitting}
+                  onClick={onSubmit}
+                >
+                  {isSubmitting ? 'Submitting…' : 'Submit Application'}
                 </PrimaryButton>
               ) : (
                 <PrimaryButton type="button" onClick={onNext}>

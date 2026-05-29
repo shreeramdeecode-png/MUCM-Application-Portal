@@ -1,4 +1,5 @@
 import { paymentOptions } from './applicationFormOptions.js'
+import { getTransferMdProgramCodes } from '../utils/programTypes.js'
 
 /**
  * Build application steps with dynamic dropdown options.
@@ -18,6 +19,9 @@ export function buildApplicationSteps(dynOptions = {}, dynPrograms = [], dynDocR
         description: p.description && p.description !== '—' ? p.description : undefined,
       }))
     : []
+
+  const transferMdProgramCodes = getTransferMdProgramCodes(dynPrograms)
+  const transferCreditsShowWhen = { field: 'programType', anyOf: transferMdProgramCodes }
 
   // Build sub-program options dynamically based on selected program
   // This will be filtered in the component based on programType value
@@ -465,6 +469,35 @@ const transferDefaultItem = {
         fullWidth: true,
       },
       {
+        name: 'transferCredits',
+        type: 'repeatable',
+        sectionTitle: 'Transfer Credits',
+        sectionSubtitle: 'For students transferring from another medical school',
+        sectionNote:
+          'If you are transferring from another medical school or have completed relevant coursework elsewhere, please list the details below.',
+        itemBadge: 'Transfer',
+        addLabel: 'Add Another Transfer Credit',
+        minItems: 1,
+        defaultItem: transferDefaultItem,
+        itemFields: [
+          {
+            name: 'institution',
+            label: 'Institution Name & Address',
+            type: 'text',
+            placeholder: "e.g., St. George's University, Grenada",
+          },
+          {
+            name: 'courses',
+            label: 'Courses Completed & Passed',
+            type: 'text',
+            placeholder: 'e.g., Anatomy, Biochemistry',
+          },
+        ],
+        showWhen: transferCreditsShowWhen,
+        fullWidth: true,
+        variant: 'transfer',
+      },
+      {
         name: 'subProgram',
         label: 'Sub-Program',
         type: 'select',
@@ -489,34 +522,6 @@ const transferDefaultItem = {
         required: true,
         options: opt('Admission Sought - Preferred Year', []),
         placeholder: 'Select year',
-      },
-      {
-        name: 'transferCredits',
-        type: 'repeatable',
-        sectionTitle: 'Transfer Credits',
-        sectionSubtitle: 'For students transferring from another medical school',
-        sectionNote:
-          'If you are transferring from another medical school or have completed relevant coursework elsewhere, please list the details below. This section is optional.',
-        itemBadge: 'Transfer',
-        addLabel: 'Add Another Transfer Credit',
-        minItems: 1,
-        defaultItem: transferDefaultItem,
-        itemFields: [
-          {
-            name: 'institution',
-            label: 'Institution Name & Address',
-            type: 'text',
-            placeholder: "e.g., St. George's University, Grenada",
-          },
-          {
-            name: 'courses',
-            label: 'Courses Completed & Passed',
-            type: 'text',
-            placeholder: 'e.g., Anatomy, Biochemistry',
-          },
-        ],
-        showWhen: { field: 'programType', equals: 'transfer-md' },
-        fullWidth: true,
       },
       {
         name: '__abEnglishNote',
@@ -784,15 +789,6 @@ const transferDefaultItem = {
         options: opt('Disclosures - Referral Source', []),
         placeholder: 'Select an option',
         section: 'Referral',
-      },
-      { name: 'howHeardOther', label: 'Please specify', type: 'text', section: 'Referral' },
-      {
-        name: 'referralDescription',
-        label: 'Let us know how you heard about MUCM or who referred you to us.',
-        type: 'text',
-        section: 'Referral',
-        fullWidth: true,
-        placeholder: 'Short answer (e.g. who referred you, event, or channel)',
       },
     ],
   },
@@ -1296,12 +1292,13 @@ const transferDefaultItem = {
         name: 'reviewSignatureUpload',
         label: 'Upload signature',
         type: 'file',
-        accept: '.pdf,.png,.jpg,.jpeg',
-        maxFileSizeMB: 10,
+        accept: '.png,.jpg,.jpeg,.webp',
+        maxFileSizeMB: 5,
         fullWidth: true,
         compact: true,
+        storeAsDataUrl: true,
         required: true,
-        helper: 'PDF, PNG, or JPEG, max 10 MB.',
+        helper: 'PNG or JPEG image only, max 5 MB.',
         showWhen: { field: 'reviewSignatureMethod', equals: 'upload' },
       },
       {

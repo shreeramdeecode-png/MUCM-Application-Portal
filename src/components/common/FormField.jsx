@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircle2, Download, FileStack } from 'lucide-react'
+import { CheckCircle2, Download, FileStack, Plus, Trash2 } from 'lucide-react'
 import { countries } from '../../data/countries.js'
 import { countryCallingCodes } from '../../data/countryCallingCodes.js'
 import { formatAcceptLabels } from '../../utils/fileFieldMeta.js'
 import { normalizeSelectOptions } from '../../utils/formVisibility.js'
+import { collectRepeatableFieldErrors } from '../../utils/formValidation.js'
 import DateInput from './DateInput.jsx'
 import FileDropzone from './FileDropzone.jsx'
+import { SIGNATURE_SCRIPT_FONT } from './SignatureReviewValue.jsx'
 
 function sanitizePhoneInput(raw) {
   const value = String(raw ?? '')
@@ -77,6 +79,10 @@ function CountryCombobox({
   const [isOpen, setIsOpen] = useState(false)
   const [query, setQuery] = useState(() => value ?? '')
   const [activeIndex, setActiveIndex] = useState(-1)
+
+  useEffect(() => {
+    setQuery(value ?? '')
+  }, [value])
 
   useEffect(() => {
     function handleOutsideClick(event) {
@@ -216,6 +222,7 @@ function CountryCombobox({
 }
 
 function RepeatableBlock({ field, value, onChange, errors, onUploadActivityChange }) {
+  const isTransferVariant = field.variant === 'transfer'
   const defaultItem = field.defaultItem ?? {}
   const items =
     Array.isArray(value) && value.length > 0
@@ -245,9 +252,12 @@ function RepeatableBlock({ field, value, onChange, errors, onUploadActivityChang
     )
   }
 
+  const showHeader = field.sectionTitle || field.sectionSubtitle
+  const showNote = field.sectionNote
+
   return (
     <div className="sm:col-span-2 space-y-4">
-      {field.sectionTitle ? (
+      {showHeader ? (
         <div className="flex items-start gap-3">
           <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#D4A843]/20 to-[#D4A843]/5 shadow-sm">
             <FileStack className="h-4 w-4 text-[#D4A843]" strokeWidth={2} />
@@ -262,7 +272,7 @@ function RepeatableBlock({ field, value, onChange, errors, onUploadActivityChang
           </div>
         </div>
       ) : null}
-      {field.sectionNote ? (
+      {showNote ? (
         <div className="rounded-xl border border-blue-200/40 bg-blue-50/60 p-4">
           <p className="text-sm leading-relaxed text-blue-800/70">{field.sectionNote}</p>
         </div>
@@ -272,19 +282,38 @@ function RepeatableBlock({ field, value, onChange, errors, onUploadActivityChang
         {items.map((row, rowIndex) => (
           <div
             key={`${field.name}-${rowIndex}`}
-            className="relative rounded-md border border-border bg-card p-4 shadow-sm sm:p-5"
+            className={
+              isTransferVariant
+                ? 'relative rounded-xl border border-[#0A1628]/10 bg-white p-5 shadow-[0_2px_12px_-4px_rgba(10,22,40,0.12)] sm:p-6'
+                : 'relative rounded-md border border-border bg-card p-4 shadow-sm sm:p-5'
+            }
           >
             <div className="mb-4 flex items-center justify-between">
-              <span className="rounded-full bg-[#D4A843]/10 px-3 py-1 text-xs font-bold text-[#D4A843]">
+              <span
+                className={
+                  isTransferVariant
+                    ? 'text-sm font-semibold text-muted-foreground'
+                    : 'rounded-full bg-[#D4A843]/10 px-3 py-1 text-xs font-bold text-[#D4A843]'
+                }
+              >
                 {field.itemBadge} {rowIndex + 1}
               </span>
               {items.length > (field.minItems ?? 1) ? (
                 <button
                   type="button"
                   onClick={() => removeRow(rowIndex)}
-                  className="text-sm font-semibold text-red-500 hover:text-red-700"
+                  className={
+                    isTransferVariant
+                      ? 'flex h-9 w-9 items-center justify-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-600'
+                      : 'text-sm font-semibold text-red-500 hover:text-red-700'
+                  }
+                  aria-label={`Remove ${field.itemBadge ?? 'entry'} ${rowIndex + 1}`}
                 >
-                  Remove
+                  {isTransferVariant ? (
+                    <Trash2 className="h-4 w-4" strokeWidth={2} aria-hidden />
+                  ) : (
+                    'Remove'
+                  )}
                 </button>
               ) : null}
             </div>
@@ -312,8 +341,9 @@ function RepeatableBlock({ field, value, onChange, errors, onUploadActivityChang
       <button
         type="button"
         onClick={addRow}
-        className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-[#D4A843]/30 px-4 py-2.5 text-sm font-semibold text-[#D4A843] transition hover:border-[#D4A843]/50 hover:bg-[#D4A843]/5"
+        className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-[#D4A843]/40 px-4 py-3 text-sm font-semibold text-[#D4A843] transition hover:border-[#D4A843]/60 hover:bg-[#D4A843]/5"
       >
+        {isTransferVariant ? <Plus className="h-4 w-4 shrink-0" strokeWidth={2.5} aria-hidden /> : null}
         {field.addLabel ?? 'Add another'}
       </button>
     </div>
@@ -325,6 +355,7 @@ function FormField({
   value,
   onChange,
   error,
+  allErrors = {},
   onUploadActivityChange,
   onFileUpload,
   allValues = {},
@@ -429,12 +460,16 @@ function FormField({
   }
 
   if (type === 'repeatable') {
+    const repeatableErrors =
+      error && typeof error === 'object' && !Array.isArray(error)
+        ? error
+        : collectRepeatableFieldErrors(name, allErrors)
     return (
       <RepeatableBlock
         field={field}
         value={value}
         onChange={onChange}
-        errors={error && typeof error === 'object' ? error : {}}
+        errors={repeatableErrors}
         onUploadActivityChange={onUploadActivityChange}
       />
     )
@@ -447,7 +482,7 @@ function FormField({
   if (type === 'radioGroup') {
     const opts = field.options ?? []
     return (
-      <div>
+      <div data-mucm-field={name}>
         <span className={labelClasses}>
           {label} {required ? <span className="text-red-500">*</span> : null}
         </span>
@@ -482,7 +517,7 @@ function FormField({
             )
           })}
         </div>
-        {error && typeof error === 'string' ? (
+        {error ? (
           <small className="mt-2 block text-xs font-medium text-destructive">{error}</small>
         ) : null}
       </div>
@@ -537,25 +572,30 @@ function FormField({
   if (type === 'checkbox') {
     const declaration = field.declarationStyle === true
     return (
-      <label
-        className={`flex cursor-pointer items-start gap-3 transition ${
-          declaration
-            ? 'rounded-xl border-2 border-[#D4A843]/35 bg-white/90 p-3.5 shadow-inner shadow-[#D4A843]/10 hover:border-[#D4A843]/55 sm:p-4'
-            : 'rounded-md border border-border bg-card p-3.5 shadow-sm hover:border-accent/50'
-        }`}
-      >
-        <input
-          type="checkbox"
-          className={`mt-1 h-[18px] w-[18px] accent-[#D4A843] ${declaration ? 'shrink-0' : ''}`}
-          checked={Boolean(value)}
-          onChange={(event) => onChange(name, event.target.checked)}
-        />
-        <span
-          className={`leading-relaxed text-foreground/90 ${declaration ? 'text-sm sm:text-[15px]' : 'text-sm'}`}
+      <div>
+        <label
+          className={`flex cursor-pointer items-start gap-3 transition ${
+            declaration
+              ? `rounded-xl border-2 bg-white/90 p-3.5 shadow-inner sm:p-4 ${error ? 'border-destructive shadow-destructive/10' : 'border-[#D4A843]/35 shadow-[#D4A843]/10 hover:border-[#D4A843]/55'}`
+              : `rounded-md border bg-card p-3.5 shadow-sm ${error ? 'border-destructive' : 'border-border hover:border-accent/50'}`
+          }`}
         >
-          {label} {required ? <span className="text-red-500">*</span> : null}
-        </span>
-      </label>
+          <input
+            type="checkbox"
+            className={`mt-1 h-[18px] w-[18px] accent-[#D4A843] ${declaration ? 'shrink-0' : ''}`}
+            checked={Boolean(value)}
+            onChange={(event) => onChange(name, event.target.checked)}
+          />
+          <span
+            className={`leading-relaxed text-foreground/90 ${declaration ? 'text-sm sm:text-[15px]' : 'text-sm'}`}
+          >
+            {label} {required ? <span className="text-red-500">*</span> : null}
+          </span>
+        </label>
+        {error ? (
+          <small className="mt-1 block text-xs font-medium text-destructive">{error}</small>
+        ) : null}
+      </div>
     )
   }
 
@@ -596,9 +636,13 @@ function FormField({
   }
 
   if (type === 'file') {
-    const accept = field.accept ?? '.pdf,.jpg,.jpeg,.png'
+    const isSignatureFile = /signature/i.test(String(name))
+    const accept = isSignatureFile
+      ? '.png,.jpg,.jpeg,.webp'
+      : field.accept ?? '.pdf,.jpg,.jpeg,.png'
     const maxFileSizeMB = field.maxFileSizeMB ?? 5
     const formatsText = formatAcceptLabels(accept)
+    const useServerUpload = Boolean(onFileUpload) && !isSignatureFile
     return (
       <div className="block">
         <FileDropzone
@@ -611,9 +655,9 @@ function FormField({
           formatsLine={`Accepted formats: ${formatsText}. Maximum file size: ${maxFileSizeMB} MB.`}
           helperText={helper}
           onChange={(next) => onChange(name, next)}
-          onUploadFile={onFileUpload ? (file) => onFileUpload(name, file, field) : undefined}
+          onUploadFile={useServerUpload ? (file) => onFileUpload(name, file, field) : undefined}
           onUploadActivityChange={onUploadActivityChange}
-          storeAsDataUrl={Boolean(field.storeAsDataUrl)}
+          storeAsDataUrl={Boolean(field.storeAsDataUrl) || isSignatureFile}
           compact={Boolean(field.compact)}
         />
       </div>
@@ -755,7 +799,7 @@ function FormField({
                 : 'mt-2 min-h-[2.85rem] text-[clamp(2rem,5vw,3.25rem)]'
             }`}
             style={{
-              fontFamily: "'Mr Dafoe', 'Segoe Script', 'Brush Script MT', cursive",
+              fontFamily: SIGNATURE_SCRIPT_FONT,
             }}
           >
             {preview || '—'}

@@ -1,4 +1,5 @@
 import { moduleNavigation } from '../../data/sidebarModulesContent.js'
+import { MUCM_CREST_LOGO } from '../../constants/branding.js'
 import { Bell, CircleHelp, FileText, FolderOpen, LayoutPanelTop, ReceiptText } from 'lucide-react'
 
 const moduleIconMap = {
@@ -9,9 +10,6 @@ const moduleIconMap = {
   'Submitted Applications': ReceiptText,
 }
 
-const crestLogo =
-  'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
-
 function StepSidebar({ activeModule, onModuleChange }) {
   return (
     <aside className="relative hidden h-screen overflow-hidden border-r border-white/10 bg-gradient-to-b from-[#071427] via-[#0A1628] to-[#0f2742] text-white lg:sticky lg:top-0 lg:block">
@@ -20,7 +18,7 @@ function StepSidebar({ activeModule, onModuleChange }) {
       <div className="relative flex h-full flex-col px-6 py-8">
         <div className="mb-5 flex items-center justify-center">
           <img
-            src={crestLogo}
+            src={MUCM_CREST_LOGO}
             alt="MUCM Crest"
             className="h-14 w-14 rounded-xl border border-white/20 bg-white/10 p-1.5 shadow-sm"
           />

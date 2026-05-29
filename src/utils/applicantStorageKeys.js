@@ -174,6 +174,49 @@ export function clearApplicantLocalDrafts(session = {}) {
   LEGACY_DRAFT_KEYS.forEach((k) => window.localStorage.removeItem(k))
 }
 
+const JUST_SUBMITTED_STORAGE_KEY = 'mucm-just-submitted'
+/** How long after submit we restore the success screen on reload (same browser tab). */
+export const JUST_SUBMITTED_DISPLAY_MS = 30 * 60 * 1000
+
+export function markJustSubmitted(scope) {
+  if (!scope || typeof window === 'undefined') return
+  try {
+    window.sessionStorage.setItem(
+      JUST_SUBMITTED_STORAGE_KEY,
+      JSON.stringify({ scope: String(scope), at: Date.now() }),
+    )
+  } catch {
+    // ignore
+  }
+}
+
+export function clearJustSubmitted() {
+  if (typeof window === 'undefined') return
+  try {
+    window.sessionStorage.removeItem(JUST_SUBMITTED_STORAGE_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+export function readJustSubmitted(scope) {
+  if (!scope || typeof window === 'undefined') return null
+  try {
+    const raw = window.sessionStorage.getItem(JUST_SUBMITTED_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (String(parsed?.scope ?? '') !== String(scope)) return null
+    const at = Number(parsed?.at)
+    if (!Number.isFinite(at) || Date.now() - at > JUST_SUBMITTED_DISPLAY_MS) {
+      window.sessionStorage.removeItem(JUST_SUBMITTED_STORAGE_KEY)
+      return null
+    }
+    return { at }
+  } catch {
+    return null
+  }
+}
+
 /** Allow server re-hydration after logout/login (tab session flags only). */
 export function clearApplicantHydrationSessionFlags(scope) {
   const prefix = `mucm-hydrated:${scope}:`

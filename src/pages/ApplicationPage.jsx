@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Download, FileText, Landmark } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import AppModuleTopBar from '../components/application/AppModuleTopBar.jsx'
+import MobileModuleNav from '../components/application/MobileModuleNav.jsx'
 import StepForm from '../components/application/StepForm.jsx'
 import StepSidebar from '../components/application/StepSidebar.jsx'
 import PrimaryButton from '../components/common/PrimaryButton.jsx'
@@ -16,15 +19,18 @@ import { countries } from '../data/countries.js'
 import {
   faqSections,
   faqSupport,
-  moduleNavigation,
 } from '../data/sidebarModulesContent.js'
 import { usePersistentState } from '../hooks/usePersistentState.js'
 import { useDropdownOptions } from '../hooks/useDropdownOptions.js'
 import { getAutofillStudentInfo } from '../utils/studentInfoAutofill.js'
 import { downloadApplicationSummaryPdf } from '../utils/applicationFormPdf.js'
-import { buildPdfSections } from '../utils/pdfDataBuilders.js'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
-import { getSelectValues, isFieldVisible } from '../utils/formVisibility.js'
+import { getSelectValues, isFieldVisible, rowHasValues } from '../utils/formVisibility.js'
+import {
+  DOCUMENT_UPLOAD_REQUIRED_MESSAGE,
+  isFieldValueEmpty,
+  REQUIRED_FIELD_MESSAGE,
+} from '../utils/formValidation.js'
 import {
   filterFaqsByContext,
   groupFaqRowsByCategory,
@@ -34,10 +40,14 @@ import {
 import {
   activeApplicationStorageKey,
   clearApplicantHydrationSessionFlags,
+  clearApplicantLocalDrafts,
+  clearJustSubmitted,
   draftFormStorageKey,
   draftStepStorageKey,
   getApplicantStorageScope,
+  markJustSubmitted,
   migrateApplicantDraftStorage,
+  readJustSubmitted,
   submissionsStorageKey,
 } from '../utils/applicantStorageKeys.js'
 import { buildHydrationPatchFromFullApplication, normalizeSingleton } from '../utils/applicationApiHydration.js'
@@ -164,6 +174,8 @@ const initialForm = applicationSteps.reduce((accumulator, step) => {
   step.fields.forEach((field) => {
     if (field.type === 'checkbox') {
       accumulator[field.name] = field.defaultValue ?? false
+    } else if (field.type === 'repeatable') {
+      accumulator[field.name] = Array.isArray(field.defaultValue) ? field.defaultValue : []
     } else {
       accumulator[field.name] = field.defaultValue ?? ''
     }
@@ -177,6 +189,8 @@ function ApplicationPage() {
   const desktopScrollRef = useRef(null)
   const autoSaveTimerRef = useRef(null)
   const hasInitializedAutoSaveRef = useRef(false)
+  const suppressCooldownModalRef = useRef(false)
+  const [isDownloadingSummary, setIsDownloadingSummary] = useState(false)
   const authSession = getAuthSession()
   migrateApplicantDraftStorage(authSession)
   const userEmail = authSession?.email ?? ''
@@ -249,6 +263,7 @@ function ApplicationPage() {
   const [draftNotice, setDraftNotice] = useState('')
   const [autoSaveStatus, setAutoSaveStatus] = useState('saved')
   const [submitted, setSubmitted] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
   const [ticketForm, setTicketForm] = useState({
     email: userEmail,
     categoryId: '',
@@ -682,8 +697,6 @@ function ApplicationPage() {
         special_accomadations: yesNoToBoolean(formValues.requiresAccommodation),
         accommodation_details: normalizeText(formValues.accommodationDetails),
         referral_source: normalizeText(formValues.howHeard),
-        referral_source_other: normalizeText(formValues.howHeardOther),
-        referral_description: normalizeText(formValues.referralDescription),
       },
       experiences: experienceRows,
       documents: buildDocumentsSectionPayload(formValues),
@@ -998,16 +1011,44 @@ function ApplicationPage() {
   }, [activeModule, supportCenterTab, portalUserId, authToken, userEmail])
 
   useEffect(() => {
-    if (submitted) {
+    if (!userEmail || submitted) {
       return
     }
+
+    if (readJustSubmitted(applicantScope)) {
+      try {
+        const all = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
+        const mine = (Array.isArray(all) ? all : []).filter(
+          (item) => item.userEmail === userEmail && item.submittedAt,
+        )
+        if (mine.length > 0) {
+          const latest = mine[0]
+          setSubmittedSnapshot(latest.formValues ?? null)
+          setLastSubmissionId(latest.id ?? '')
+          setSubmitted(true)
+          setCooldownNotice({ isBlocked: false, nextAllowedAt: null, open: false })
+          window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+          return
+        }
+      } catch {
+        clearJustSubmitted()
+      }
+    }
+
     const status = evaluateSubmitCooldown()
+    const shouldOpenModal = status.isBlocked && !suppressCooldownModalRef.current
+    suppressCooldownModalRef.current = false
     setCooldownNotice({
       isBlocked: status.isBlocked,
       nextAllowedAt: status.nextAllowedAt,
-      open: status.isBlocked,
+      open: shouldOpenModal,
     })
-  }, [submitted, userEmail])
+  }, [submitted, userEmail, applicantScope, submissionsPersistKey])
+
+  useEffect(() => {
+    if (!submitted) return
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+  }, [submitted])
 
   useEffect(() => {
     // Keep UX consistent: every step opens from the top.
@@ -1113,6 +1154,11 @@ function ApplicationPage() {
     () => dynamicSteps[currentStepIndex] ?? dynamicSteps[0],
     [currentStepIndex, dynamicSteps],
   )
+
+  useEffect(() => {
+    setValidationErrors({})
+    setFormError('')
+  }, [currentStepIndex])
   const uploadedDocuments = useMemo(() => {
     const documentStep =
       dynamicSteps.find((step) => step.id === 'documents')?.fields ?? []
@@ -1363,19 +1409,47 @@ function ApplicationPage() {
     }
   }, [activeModule, authToken])
 
-  function validateField(field, value) {
-    const stringValue = typeof value === 'string' ? value.trim() : value
-
-    if (field.required) {
-      if (field.type === 'checkbox' && !value) {
-        return 'This field is required.'
-      }
-      if (field.type !== 'checkbox' && !stringValue) {
-        return 'This field is required.'
+  function clearStepValidationErrors(previous, step) {
+    const next = { ...previous }
+    for (const field of step?.fields ?? []) {
+      if (field.type === 'repeatable') {
+        const prefix = `${field.name}__`
+        for (const key of Object.keys(next)) {
+          if (key.startsWith(prefix)) {
+            delete next[key]
+          }
+        }
+      } else if (field.name) {
+        delete next[field.name]
       }
     }
+    return next
+  }
 
-    if (!stringValue && !field.required) {
+  function validateField(field, value, options = {}) {
+    // Disabled fields cannot be interacted with — skip validation entirely.
+    if (field.disabled) {
+      return ''
+    }
+
+    if (options.skipRequiredFileFields && field.type === 'file' && field.required) {
+      return ''
+    }
+
+    const stringValue = typeof value === 'string' ? value.trim() : value
+
+    // A tel field that only contains a dial code (e.g. "+1") has no real number entered.
+    const isTelDialCodeOnly =
+      field.type === 'tel' &&
+      typeof value === 'string' &&
+      /^\+\d{1,4}\s*$/.test(value.trim())
+
+    if (field.required && isFieldValueEmpty(field, value)) {
+      return field.type === 'file' ? DOCUMENT_UPLOAD_REQUIRED_MESSAGE : REQUIRED_FIELD_MESSAGE
+    }
+
+    // Nothing more to validate for empty optional fields.
+    if (isFieldValueEmpty(field, value) && !field.required) {
       return ''
     }
 
@@ -1387,12 +1461,8 @@ function ApplicationPage() {
     }
 
     if (field.type === 'tel') {
-      const phoneRaw = String(stringValue).trim()
-      // Treat "country code only" as empty for optional phone fields.
-      if (!field.required && /^\+\d{1,4}$/.test(phoneRaw)) {
-        return ''
-      }
-      const digits = phoneRaw.replace(/\D/g, '')
+      // Optional field with only a dial code is fine — already returned '' above.
+      const digits = String(stringValue).replace(/\D/g, '')
       if (digits.length < 7) {
         return 'Please enter a valid phone number.'
       }
@@ -1428,7 +1498,7 @@ function ApplicationPage() {
     return ''
   }
 
-  function validateRepeatableNested(field, rows, valuesToCheck) {
+  function validateRepeatableNested(field, rows, valuesToCheck, options = {}) {
     const nested = {}
     const list =
       Array.isArray(rows) && rows.length > 0
@@ -1439,7 +1509,7 @@ function ApplicationPage() {
         if (!isFieldVisible(sub, valuesToCheck)) {
           continue
         }
-        const message = validateField(sub, row?.[sub.name])
+        const message = validateField(sub, row?.[sub.name], options)
         if (message) {
           nested[`${field.name}__${rowIndex}__${sub.name}`] = message
         }
@@ -1448,8 +1518,10 @@ function ApplicationPage() {
     return nested
   }
 
-  function validateStep(step, valuesToCheck) {
+  function validateStep(step, valuesToCheck, options = {}) {
     const stepErrors = {}
+    const skipRequiredFileFields =
+      options.skipRequiredFileFields === true && step?.id === 'documents'
 
     step.fields.forEach((field) => {
       if (!isFieldVisible(field, valuesToCheck)) {
@@ -1458,17 +1530,36 @@ function ApplicationPage() {
       if (field.type === 'repeatable') {
         Object.assign(
           stepErrors,
-          validateRepeatableNested(field, valuesToCheck[field.name], valuesToCheck),
+          validateRepeatableNested(field, valuesToCheck[field.name], valuesToCheck, {
+            skipRequiredFileFields,
+          }),
         )
         return
       }
-      const message = validateField(field, valuesToCheck[field.name])
+      const message = validateField(field, valuesToCheck[field.name], {
+        skipRequiredFileFields,
+      })
       if (message) {
         stepErrors[field.name] = message
       }
     })
 
     return stepErrors
+  }
+
+  function stepValidationOptions(step) {
+    return { skipRequiredFileFields: step?.id === 'documents' }
+  }
+
+  function hasDocumentUploadErrors(allErrors) {
+    const documentStep = dynamicSteps.find((s) => s.id === 'documents')
+    if (!documentStep) return false
+    const requiredFileNames = new Set(
+      documentStep.fields
+        .filter((field) => field.type === 'file' && field.required)
+        .map((field) => field.name),
+    )
+    return Object.keys(allErrors).some((key) => requiredFileNames.has(key))
   }
 
   function escapeAttrSelector(value) {
@@ -1594,24 +1685,21 @@ function ApplicationPage() {
 
       const mergedValues = { ...formValues, [name]: value }
 
+      // Only clear errors as the user fixes fields — never add new ones here.
+      // Required messages are shown only after Save & Continue (handleNext / handleSubmit).
       if (activeField?.type === 'repeatable') {
+        const nested = validateRepeatableNested(activeField, value, mergedValues)
         for (const k of Object.keys(nextErrors)) {
-          if (k.startsWith(`${name}__`)) {
+          if (k.startsWith(`${name}__`) && !nested[k]) {
             delete nextErrors[k]
           }
         }
-        Object.assign(
-          nextErrors,
-          validateRepeatableNested(activeField, value, mergedValues),
-        )
         return nextErrors
       }
 
       if (activeField) {
         const message = validateField(activeField, value)
-        if (message) {
-          nextErrors[name] = message
-        } else {
+        if (!message) {
           delete nextErrors[name]
         }
       }
@@ -1622,10 +1710,13 @@ function ApplicationPage() {
   }
 
   async function handleNext() {
-    const stepErrors = validateStep(currentStep, formValues)
+    const stepErrors = validateStep(currentStep, formValues, stepValidationOptions(currentStep))
 
     if (Object.keys(stepErrors).length > 0) {
-      setValidationErrors((previous) => ({ ...previous, ...stepErrors }))
+      setValidationErrors((previous) => ({
+        ...clearStepValidationErrors(previous, currentStep),
+        ...stepErrors,
+      }))
       setFormError('Please fix the highlighted fields before continuing.')
       scheduleScrollToFirstInvalidField(currentStep, stepErrors, formValues)
       return
@@ -1662,7 +1753,7 @@ function ApplicationPage() {
 
     for (let index = 0; index < safeTarget; index += 1) {
       const step = dynamicSteps[index]
-      const stepErrors = validateStep(step, formValues)
+      const stepErrors = validateStep(step, formValues, stepValidationOptions(step))
       if (Object.keys(stepErrors).length > 0) {
         if (firstInvalidStep === -1) {
           firstInvalidStep = index
@@ -1672,7 +1763,13 @@ function ApplicationPage() {
     }
 
     if (firstInvalidStep !== -1) {
-      setValidationErrors((previous) => ({ ...previous, ...aggregateErrors }))
+      setValidationErrors((previous) => {
+        let next = previous
+        for (let index = 0; index < safeTarget; index += 1) {
+          next = clearStepValidationErrors(next, dynamicSteps[index])
+        }
+        return { ...next, ...aggregateErrors }
+      })
       setFormError('Please complete the current step before moving to the next one.')
       setCurrentStepIndex(firstInvalidStep)
       const invalidStep = dynamicSteps[firstInvalidStep]
@@ -1706,6 +1803,8 @@ function ApplicationPage() {
   }
 
   async function handleSubmit() {
+    if (isSubmitting) return
+
     const cooldownStatus = evaluateSubmitCooldown()
     if (cooldownStatus.isBlocked) {
       setCooldownNotice({
@@ -1730,7 +1829,11 @@ function ApplicationPage() {
 
     if (Object.keys(allErrors).length > 0) {
       setValidationErrors(allErrors)
-      setFormError('Please complete all required fields with valid values.')
+      setFormError(
+        hasDocumentUploadErrors(allErrors)
+          ? 'Please upload all required documents before submitting your application.'
+          : 'Please complete all required fields with valid values.',
+      )
       if (firstInvalidStep >= 0) {
         const invalidStep = dynamicSteps[firstInvalidStep]
         const errsForStep = validateStep(invalidStep, formValues)
@@ -1742,6 +1845,8 @@ function ApplicationPage() {
 
     setValidationErrors({})
     setFormError('')
+    setIsSubmitting(true)
+
     let persistedApplicationMeta = activeApplication
     try {
       persistedApplicationMeta = await persistApplication({
@@ -1749,70 +1854,114 @@ function ApplicationPage() {
         isComplete: true,
       })
       await syncApplicationSections(persistedApplicationMeta.id)
+
+      const documentFields =
+        dynamicSteps
+          .find((step) => step.id === 'documents')
+          ?.fields.filter((field) => field.type === 'file') ?? []
+      const applicationId = persistedApplicationMeta.applicationId || `APP-${Date.now()}`
+      const submittedAt = new Date().toISOString()
+      const snapshot =
+        typeof structuredClone === 'function'
+          ? structuredClone(formValues)
+          : JSON.parse(JSON.stringify(formValues))
+      if (Array.isArray(snapshot.transferCredits)) {
+        snapshot.transferCredits = snapshot.transferCredits.filter(rowHasValues)
+      }
+      const submittedRecord = {
+        id: applicationId,
+        applicationRowId: String(persistedApplicationMeta.id || ''),
+        submittedAt,
+        userEmail,
+        applicantName: `${formValues.firstName ?? ''} ${formValues.surname ?? ''}`.trim() || 'Applicant',
+        formValues: snapshot,
+        documents: documentFields.map((field) => ({
+          name: field.name,
+          label: field.label,
+          required: Boolean(field.required),
+          value: formValues[field.name] ?? '',
+        })),
+      }
+      try {
+        const existing = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
+        const safeExisting = Array.isArray(existing) ? existing : []
+        safeExisting.unshift(submittedRecord)
+        window.localStorage.setItem(submissionsPersistKey, JSON.stringify(safeExisting))
+      } catch {
+        // ignore storage issues
+      }
+
+      markJustSubmitted(applicantScope)
+      setCooldownNotice({ isBlocked: false, nextAllowedAt: null, open: false })
+      setSubmittedSnapshot(snapshot)
+      setLastSubmissionId(applicationId)
+      setSubmitted(true)
+      // Clear draft after success state is set so the success screen always renders.
+      setCurrentStepIndex(0)
+      setFormValues(initialForm)
+      setActiveApplication({ ...EMPTY_ACTIVE_APPLICATION })
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
     } catch (error) {
       setFormError(error.message || 'Unable to submit application to server.')
-      return
+    } finally {
+      setIsSubmitting(false)
     }
-    const documentFields =
-      dynamicSteps
-        .find((step) => step.id === 'documents')
-        ?.fields.filter((field) => field.type === 'file') ?? []
-    const applicationId = persistedApplicationMeta.applicationId || `APP-${Date.now()}`
-    const submittedAt = new Date().toISOString()
-    const snapshot =
-      typeof structuredClone === 'function'
-        ? structuredClone(formValues)
-        : JSON.parse(JSON.stringify(formValues))
-    const submittedRecord = {
-      id: applicationId,
-      applicationRowId: String(persistedApplicationMeta.id || ''),
-      submittedAt,
-      userEmail,
-      applicantName: `${formValues.firstName ?? ''} ${formValues.surname ?? ''}`.trim() || 'Applicant',
-      formValues: snapshot,
-      documents: documentFields.map((field) => ({
-        name: field.name,
-        label: field.label,
-        required: Boolean(field.required),
-        value: formValues[field.name] ?? '',
-      })),
-    }
-    try {
-      const existing = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
-      const safeExisting = Array.isArray(existing) ? existing : []
-      safeExisting.unshift(submittedRecord)
-      window.localStorage.setItem(submissionsPersistKey, JSON.stringify(safeExisting))
-    } catch {
-      // ignore storage issues
-    }
-    setSubmittedSnapshot(snapshot)
-    setLastSubmissionId(applicationId)
-    // Clear current draft so returning to /application starts a new blank form.
-    setCurrentStepIndex(0)
-    setFormValues(initialForm)
-    setActiveApplication({ ...EMPTY_ACTIVE_APPLICATION })
-    setSubmitted(true)
   }
 
   function resetApplication() {
     hydratedApplicationRowRef.current = ''
     clearApplicantHydrationSessionFlags(applicantScope)
+    clearJustSubmitted()
     setCurrentStepIndex(0)
     setFormValues(initialForm)
     setSubmitted(false)
     setSubmittedSnapshot(null)
     setLastSubmissionId('')
     setActiveApplication({ ...EMPTY_ACTIVE_APPLICATION })
+    setValidationErrors({})
+    setFormError('')
+    setDraftNotice('')
+  }
+
+  function handleViewSubmittedApplications() {
+    clearJustSubmitted()
+    navigate('/submitted-applications')
+  }
+
+  function handleStartNewApplication() {
+    suppressCooldownModalRef.current = true
+    clearApplicantLocalDrafts({
+      email: userEmail,
+      userId: portalUserId,
+      token: authToken,
+    })
+    resetApplication()
+    setActiveModule('Application form')
+    setCooldownNotice((prev) => ({ ...prev, open: false }))
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
   }
 
   async function handleDownloadApplicationForm() {
     const valuesForPdf = submitted && submittedSnapshot ? submittedSnapshot : formValues
-    const sections = buildPdfSections(valuesForPdf, dynamicSteps)
-
-    await downloadApplicationSummaryPdf({
-      referenceId: lastSubmissionId || 'mucm-application',
-      sections,
-    })
+    if (!valuesForPdf || typeof valuesForPdf !== 'object') {
+      window.alert('Application data is not available for download.')
+      return
+    }
+    setIsDownloadingSummary(true)
+    try {
+      await downloadApplicationSummaryPdf({
+        referenceId: lastSubmissionId || 'mucm-application',
+        formValues: valuesForPdf,
+        programOptions: programTypeOptions,
+        steps: dynamicSteps,
+        fetchHeaders: getAuthHeader(),
+      })
+    } catch (err) {
+      console.error(err)
+      window.alert(err?.message || 'Unable to generate application PDF. Please try again.')
+    } finally {
+      setIsDownloadingSummary(false)
+    }
   }
 
 
@@ -1820,6 +1969,7 @@ function ApplicationPage() {
     const session = getAuthSession()
     const scope = getApplicantStorageScope(session)
     clearApplicantHydrationSessionFlags(scope)
+    clearJustSubmitted()
     // Do not clear draft/active-application keys here — same user expects progress after logging back in.
     // Scoped storage keys already isolate drafts per account on shared browsers.
     window.localStorage.removeItem('mucm-auth-session')
@@ -2511,6 +2661,7 @@ function ApplicationPage() {
         canGoBack={currentStepIndex > 0}
         isLastStep={currentStepIndex === dynamicSteps.length - 1}
         onSubmit={handleSubmit}
+        isSubmitting={isSubmitting}
         isLoadingStep={dynLoading && currentStep?.id === 'documents'}
       />
     )
@@ -2539,7 +2690,7 @@ function ApplicationPage() {
             <div className="mt-4 flex justify-end">
               <button
                 type="button"
-                onClick={() => setCooldownNotice((prev) => ({ ...prev, open: true }))}
+                onClick={() => setCooldownNotice((prev) => ({ ...prev, open: false }))}
                 className="rounded-lg border border-[#0A1628]/15 bg-white px-4 py-2 text-sm font-semibold text-[#0A1628]/80 transition hover:border-[#D4A843]/50 hover:bg-[#fff8e8]"
               >
                 OK
@@ -2549,56 +2700,22 @@ function ApplicationPage() {
         </div>
       ) : null}
       {!submitted ? (
-        <header className="page-gutter-x border-b border-border bg-card/95 py-3 backdrop-blur-md lg:hidden">
-          <div className="mx-auto flex max-w-7xl flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <img
-                  src={crestLogo}
-                  alt="MUCM Crest"
-                  className="h-10 w-10 rounded-lg border border-[#0A1628]/10 bg-white p-1 shadow-sm"
-                />
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#0A1628]/45 sm:text-xs">
-                    METROPOLITAN UNIVERSITY COLLEGE OF MEDICINE
-                  </p>
-                  <h1 className="text-base text-[#0A1628] [font-family:'DM_Serif_Display',serif] sm:text-lg">
-                    Application Form
-                  </h1>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5">
-                {renderAutoSaveBadge('mobile')}
-                <ProfileDropdown
-                  email={userEmail}
-                  onLogout={handleLogout}
-                  onBackToChecklist={() => navigate('/before-you-begin')}
-                />
-              </div>
-            </div>
-          </div>
-        </header>
+        <AppModuleTopBar
+          title={activeModule}
+          compact
+          className="py-3 lg:hidden"
+        >
+          {renderAutoSaveBadge('mobile')}
+          <ProfileDropdown
+            email={userEmail}
+            onLogout={handleLogout}
+            onBackToChecklist={() => navigate('/before-you-begin')}
+          />
+        </AppModuleTopBar>
       ) : null}
 
       {!submitted ? (
-        <div className="page-gutter-x border-b border-border bg-card/90 py-2 backdrop-blur lg:hidden">
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {moduleNavigation.map((module) => (
-              <button
-                key={module.name}
-                type="button"
-                onClick={() => handleModuleChange(module.name)}
-                className={`whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
-                  activeModule === module.name
-                    ? 'border-[#D4A843]/70 bg-[#D4A843]/20 text-[#0A1628]'
-                    : 'border-border bg-card/95 text-muted-foreground'
-                }`}
-              >
-                {module.name}
-              </button>
-            ))}
-          </div>
-        </div>
+        <MobileModuleNav activeModule={activeModule} onModuleChange={handleModuleChange} />
       ) : null}
 
       {submitted ? (
@@ -2700,11 +2817,12 @@ function ApplicationPage() {
                 </div>
                 <button
                   type="button"
+                  disabled={isDownloadingSummary}
                   onClick={handleDownloadApplicationForm}
-                  className="mt-4 flex items-center justify-center gap-2 rounded-lg border border-[#D4A843]/45 bg-gradient-to-r from-[#D4A843]/12 to-[#D4A843]/5 px-4 py-2.5 text-sm font-semibold text-[#5c4510] shadow-sm transition hover:border-[#D4A843]/70 hover:from-[#D4A843]/18 hover:to-[#D4A843]/8"
+                  className="mt-4 flex items-center justify-center gap-2 rounded-lg border border-[#D4A843]/45 bg-gradient-to-r from-[#D4A843]/12 to-[#D4A843]/5 px-4 py-2.5 text-sm font-semibold text-[#5c4510] shadow-sm transition hover:border-[#D4A843]/70 hover:from-[#D4A843]/18 hover:to-[#D4A843]/8 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Download className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
-                  Download Summary (PDF)
+                  {isDownloadingSummary ? 'Preparing PDF…' : 'Download Summary (PDF)'}
                 </button>
               </div>
 
@@ -2764,11 +2882,11 @@ function ApplicationPage() {
             <PrimaryButton
               variant="outline"
               type="button"
-              onClick={() => navigate('/submitted-applications')}
+              onClick={handleViewSubmittedApplications}
             >
               View Submitted Applications
             </PrimaryButton>
-            <PrimaryButton variant="outline" type="button" onClick={resetApplication}>
+            <PrimaryButton variant="outline" type="button" onClick={handleStartNewApplication}>
               Start New Application
             </PrimaryButton>
           </div>
@@ -2781,31 +2899,17 @@ function ApplicationPage() {
             onModuleChange={handleModuleChange}
           />
           <section ref={desktopScrollRef} className="flex min-h-0 flex-col lg:h-[100dvh] lg:overflow-y-auto">
-            <div className="page-gutter-x hidden items-center justify-between border-b border-border bg-card/95 py-2.5 backdrop-blur-md lg:sticky lg:top-0 lg:z-20 lg:flex">
-              <div className="flex items-center gap-3">
-                <img
-                  src={crestLogo}
-                  alt="MUCM Crest"
-                  className="h-10 w-10 rounded-xl border border-border bg-card p-1 shadow-sm"
-                />
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#0A1628]/45">
-                    METROPOLITAN UNIVERSITY COLLEGE OF MEDICINE
-                  </p>
-                  <h1 className="text-xl text-[#0A1628] [font-family:'DM_Serif_Display',serif]">
-                    Application Form
-                  </h1>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                {renderAutoSaveBadge()}
-                <ProfileDropdown
-                  email={userEmail}
-                  onLogout={handleLogout}
-                  onBackToChecklist={() => navigate('/before-you-begin')}
-                />
-              </div>
-            </div>
+            <AppModuleTopBar
+              title={activeModule}
+              className="hidden lg:sticky lg:top-0 lg:z-20 lg:flex"
+            >
+              {renderAutoSaveBadge()}
+              <ProfileDropdown
+                email={userEmail}
+                onLogout={handleLogout}
+                onBackToChecklist={() => navigate('/before-you-begin')}
+              />
+            </AppModuleTopBar>
             {renderModuleContent()}
           </section>
         </div>

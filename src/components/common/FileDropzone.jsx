@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { CheckCircle2, Loader2, Upload, X } from 'lucide-react'
+import { getSignatureImageSrc } from './SignatureReviewValue.jsx'
 
 function parseAcceptExtensions(accept) {
   if (!accept || typeof accept !== 'string') return ['.pdf', '.jpg', '.jpeg', '.png']
@@ -93,7 +94,8 @@ export default function FileDropzone({
   const [pendingFileName, setPendingFileName] = useState('')
   const id = useId()
   const valueStr = value != null ? String(value) : ''
-  const isDataUrlImage = valueStr.startsWith('data:image/')
+  const previewImageSrc = getSignatureImageSrc(valueStr) || (valueStr.startsWith('data:image/') ? valueStr : '')
+  const isDataUrlImage = Boolean(previewImageSrc)
   const hasFile = Boolean(valueStr.trim())
 
   const resetInput = useCallback(() => {
@@ -296,7 +298,7 @@ export default function FileDropzone({
               {isDataUrlImage ? (
                 <div className="flex-shrink-0 rounded-lg border border-[#0A1628]/10 bg-white p-1 shadow-sm">
                   <img
-                    src={valueStr}
+                    src={previewImageSrc}
                     alt="Uploaded signature"
                     className={`block max-h-14 w-auto max-w-[200px] object-contain object-left sm:max-h-16 ${compact ? 'max-h-12 max-w-[160px] sm:max-h-14' : ''}`}
                   />
@@ -457,9 +459,6 @@ export default function FileDropzone({
                 ) : null}
               </div>
             </div>
-            {error ? (
-              <p className="w-full text-center text-xs font-medium leading-snug text-red-600 sm:text-left">{error}</p>
-            ) : null}
             {dropHint ? (
               <p id={`${id}-hint`} className="w-full text-center text-xs font-medium text-amber-700 sm:text-left" role="status">
                 {dropHint}
@@ -472,6 +471,12 @@ export default function FileDropzone({
       {dropHint && !showEmpty ? (
         <p id={`${id}-hint`} className="text-xs font-medium text-amber-700" role="status">
           {dropHint}
+        </p>
+      ) : null}
+
+      {error ? (
+        <p className="text-xs font-medium leading-snug text-destructive" role="alert">
+          {error}
         </p>
       ) : null}
     </div>

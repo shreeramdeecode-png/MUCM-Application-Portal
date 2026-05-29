@@ -184,9 +184,7 @@ export function buildHydrationPatchFromFullApplication(full, stepCount) {
       disabilityDetails: str(disc.disability_details),
       requiresAccommodation: boolToYesNo(disc.special_accomadations),
       accommodationDetails: str(disc.accommodation_details),
-      howHeard: str(disc.referral_source),
-      howHeardOther: str(disc.referral_source_other),
-      referralDescription: str(disc.referral_description),
+    howHeard: str(disc.referral_source),
     })
   }
 

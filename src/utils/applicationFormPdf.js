@@ -1,229 +1,212 @@
 import fontkit from '@pdf-lib/fontkit'
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
+import { applicationSteps } from '../data/applicationSteps.js'
+import { fillRedesignedApplicationPdf } from './applicationFormPdfFill.js'
+import { loadPassportPhotoPayload } from './applicationFormPdfImage.js'
+import { buildPdfSections } from './pdfDataBuilders.js'
+import { asText, downloadBlob } from './pdfDrawHelpers.js'
 
-const NAVY = rgb(10 / 255, 22 / 255, 40 / 255)
-const GOLD = rgb(212 / 255, 168 / 255, 67 / 255)
-const INK = rgb(18 / 255, 24 / 255, 34 / 255)
-const MUTED = rgb(0.35, 0.38, 0.45)
-const LIGHT_GOLD = rgb(235 / 255, 210 / 255, 150 / 255)
-const PANEL = rgb(0.985, 0.988, 0.995)
-const RULE = rgb(0.82, 0.85, 0.9)
-const WHITE = rgb(1, 1, 1)
+/** Official blank form — do not replace; only overlay applicant data on download. */
+const TEMPLATE_PATH = '/forms/mucm-application-form-redesigned.pdf'
 
-function wrapLine(text, font, size, maxWidth) {
-  const words = String(text ?? '').split(' ')
+const PAGE_WIDTH = 595.28
+const PAGE_HEIGHT = 841.89
+const MARGIN_X = 48
+const MARGIN_TOP = 52
+const MARGIN_BOTTOM = 48
+const TITLE_SIZE = 16
+const SECTION_SIZE = 11
+const LABEL_SIZE = 9
+const BODY_SIZE = 9
+const LINE_GAP = 4
+
+function wrapLines(text, font, size, maxWidth) {
+  const raw = asText(text)
+  if (!raw) return ['—']
+  const words = raw.split(/\s+/)
   const lines = []
-  let current = ''
-  words.forEach((word) => {
-    const candidate = current ? `${current} ${word}` : word
+  let line = ''
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word
     if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
-      current = candidate
-    } else {
-      if (current) lines.push(current)
-      current = word
+      line = candidate
+      continue
     }
-  })
-  if (current) lines.push(current)
-  return lines.length ? lines : ['']
+    if (line) lines.push(line)
+    line = word
+  }
+  if (line) lines.push(line)
+  return lines.length > 0 ? lines : ['—']
 }
 
-function downloadBlob(blob, filename) {
-  const url = window.URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  document.body.appendChild(anchor)
-  anchor.click()
-  document.body.removeChild(anchor)
-  window.URL.revokeObjectURL(url)
-}
+async function downloadOfficialFilledApplicationPdf({
+  referenceId,
+  formValues,
+  programOptions = [],
+  uploadedDocumentKeys = [],
+  uploadedDocuments = [],
+  fetchHeaders = {},
+}) {
+  const templateRes = await fetch(TEMPLATE_PATH)
+  if (!templateRes.ok) {
+    return false
+  }
 
-export async function downloadApplicationSummaryPdf({ referenceId, sections }) {
-  const fontRes = await fetch('/scripts/fonts/DMSerifDisplay-Regular.ttf')
-  const pdfDoc = await PDFDocument.create()
+  const pdfBytes = await templateRes.arrayBuffer()
+  const pdfDoc = await PDFDocument.load(pdfBytes)
   pdfDoc.registerFontkit(fontkit)
 
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold)
-  let serif = helveticaBold
-  if (fontRes.ok) {
-    serif = await pdfDoc.embedFont(await fontRes.arrayBuffer())
+
+  const passportPhotoPayload = await loadPassportPhotoPayload(formValues, {
+    fetchHeaders,
+    uploadedDocuments,
+  })
+
+  await fillRedesignedApplicationPdf(pdfDoc, formValues, {
+    helvetica,
+    helveticaBold,
+    programOptions,
+    referenceId,
+    uploadedDocumentKeys,
+    passportPhotoPayload,
+  })
+
+  const bytes = await pdfDoc.save({ useObjectStreams: false })
+  const outName = `MUCM_Application_${String(referenceId || 'form').replace(/[^\w.-]/g, '_')}.pdf`
+  downloadBlob(new Blob([bytes], { type: 'application/pdf' }), outName)
+  return true
+}
+
+async function downloadApplicationSummaryReportPdf({
+  referenceId,
+  formValues,
+  programOptions = [],
+  steps = applicationSteps,
+}) {
+  const pdfDoc = await PDFDocument.create()
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
+  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold)
+  const ink = rgb(0.08, 0.12, 0.2)
+  const muted = rgb(0.35, 0.4, 0.48)
+
+  const sections = buildPdfSections(formValues, steps, { programOptions })
+  const contentWidth = PAGE_WIDTH - MARGIN_X * 2
+  const labelWidth = 170
+  const valueWidth = contentWidth - labelWidth - 8
+
+  let page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT])
+  let y = PAGE_HEIGHT - MARGIN_TOP
+
+  const ensureSpace = (height) => {
+    if (y - height >= MARGIN_BOTTOM) return
+    page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT])
+    y = PAGE_HEIGHT - MARGIN_TOP
   }
 
-  const pageWidth = 612
-  const pageHeight = 792
-  const margin = 40
-  const maxWidth = pageWidth - margin * 2
-  const bodySize = 10
-  const smallSize = 9
-
-  let page = pdfDoc.addPage([pageWidth, pageHeight])
-  let y = pageHeight - margin
-
-  function addPage() {
-    page = pdfDoc.addPage([pageWidth, pageHeight])
-    // Draw the navy header bar on every page
-    page.drawRectangle({ x: 0, y: pageHeight - 42, width: pageWidth, height: 42, color: NAVY })
-    page.drawText('METROPOLITAN UNIVERSITY COLLEGE OF MEDICINE', {
-      x: margin,
-      y: pageHeight - 20,
-      size: 9,
-      font: helveticaBold,
-      color: WHITE,
-    })
-    page.drawText('Student Application Portal', {
-      x: margin,
-      y: pageHeight - 32,
-      size: 7.5,
-      font: helvetica,
-      color: LIGHT_GOLD,
-    })
-    y = pageHeight - margin - 24
-  }
-
-  // Initial page setup (Special large header)
-  page.drawRectangle({ x: 0, y: pageHeight - 110, width: pageWidth, height: 110, color: NAVY })
-  
-  // University Name
-  page.drawText('METROPOLITAN UNIVERSITY COLLEGE OF MEDICINE', {
-    x: pageWidth / 2 - helveticaBold.widthOfTextAtSize('METROPOLITAN UNIVERSITY COLLEGE OF MEDICINE', 11) / 2,
-    y: pageHeight - 40,
-    size: 11,
-    font: helveticaBold,
-    color: WHITE,
-  })
-
-  // Subtitles
-  const sub1 = 'Office of Admissions  ·  Student Application Portal'
-  page.drawText(sub1, {
-    x: pageWidth / 2 - helvetica.widthOfTextAtSize(sub1, 9) / 2,
-    y: pageHeight - 58,
-    size: 9,
-    font: helvetica,
-    color: LIGHT_GOLD,
-  })
-
-  const refText = `Form reference: ${referenceId || 'MUCM-APP-SUM'}`
-  page.drawText(refText, {
-    x: pageWidth / 2 - helvetica.widthOfTextAtSize(refText, 7.5) / 2,
-    y: pageHeight - 74,
-    size: 7.5,
-    font: helvetica,
-    color: rgb(0.6, 0.65, 0.75),
-  })
-
-  // Main Page Title (White text area)
-  y = pageHeight - 150
   page.drawText('Application Summary', {
-    x: margin,
-    y: y,
-    size: 28,
-    font: serif,
-    color: INK,
+    x: MARGIN_X,
+    y,
+    size: TITLE_SIZE,
+    font: fontBold,
+    color: ink,
   })
-  
-  y -= 20
-  page.drawText('Applicant Copy  ·  Official submission record', {
-    x: margin,
-    y: y,
-    size: 10,
-    font: helvetica,
-    color: MUTED,
-  })
+  y -= TITLE_SIZE + 6
 
-  // Gold accent line
-  y -= 8
-  page.drawLine({
-    start: { x: margin, y: y },
-    end: { x: margin + 110, y: y },
-    thickness: 2,
-    color: GOLD,
-  })
+  const refLine = `Reference ID: ${asText(referenceId) || '—'}`
+  page.drawText(refLine, { x: MARGIN_X, y, size: BODY_SIZE, font, color: muted })
+  y -= BODY_SIZE + 10
 
-  y -= 40
+  const generatedLine = `Generated: ${new Date().toLocaleString()}`
+  page.drawText(generatedLine, { x: MARGIN_X, y, size: BODY_SIZE, font, color: muted })
+  y -= BODY_SIZE + 14
 
-
-  sections.forEach((section) => {
-    if (y < margin + 80) addPage()
-
-    page.drawRectangle({ x: margin, y: y - 2, width: 4, height: 16, color: GOLD })
+  for (const section of sections) {
+    ensureSpace(SECTION_SIZE + 8)
     page.drawText(section.title, {
-      x: margin + 12,
+      x: MARGIN_X,
       y,
-      size: 12,
-      font: helveticaBold,
-      color: NAVY,
+      size: SECTION_SIZE,
+      font: fontBold,
+      color: ink,
     })
-    y -= 20
+    y -= SECTION_SIZE + 6
 
-    section.entries.forEach((entry) => {
-      const labelText = String(entry.label || '').toUpperCase()
-      const valueText = String(entry.value || '—')
-      
-      const labelWrapped = wrapLine(labelText, helveticaBold, 7.5, 150)
-      const valueWrapped = valueText.split('\n').flatMap((line) => wrapLine(line, helvetica, bodySize, maxWidth - 180))
-      
-      const maxLines = Math.max(labelWrapped.length, valueWrapped.length)
-      const blockHeight = Math.max(30, 16 + maxLines * (bodySize + 2))
+    for (const entry of section.entries) {
+      const label = asText(entry.label) || 'Field'
+      const valueLines = wrapLines(entry.value, font, BODY_SIZE, valueWidth)
+      const blockHeight = Math.max(LABEL_SIZE, valueLines.length * (BODY_SIZE + LINE_GAP))
+      ensureSpace(blockHeight + 6)
 
-      if (y < margin + blockHeight + 10) {
-        addPage()
-        page.drawRectangle({ x: margin, y: y - 2, width: 4, height: 16, color: GOLD })
-        page.drawText(section.title, {
-          x: margin + 12,
-          y,
-          size: 12,
-          font: helveticaBold,
-          color: NAVY,
+      page.drawText(label, {
+        x: MARGIN_X,
+        y,
+        size: LABEL_SIZE,
+        font: fontBold,
+        color: muted,
+      })
+
+      let valueY = y
+      for (const line of valueLines) {
+        page.drawText(line, {
+          x: MARGIN_X + labelWidth + 8,
+          y: valueY,
+          size: BODY_SIZE,
+          font,
+          color: ink,
         })
-        y -= 20
+        valueY -= BODY_SIZE + LINE_GAP
       }
 
-      page.drawRectangle({
-        x: margin,
-        y: y - blockHeight + 6,
-        width: maxWidth,
-        height: blockHeight,
-        color: WHITE,
-        borderColor: RULE,
-        borderWidth: 0.45,
-      })
+      y -= blockHeight + 8
+    }
 
-      // Draw Wrapped Label
-      let ly = y - 11
-      labelWrapped.forEach((line) => {
-        page.drawText(line, {
-          x: margin + 10,
-          y: ly,
-          size: 7.5,
-          font: helveticaBold,
-          color: MUTED,
-        })
-        ly -= 9
-      })
-
-      // Draw Wrapped Value
-      let vy = y - 11
-      valueWrapped.forEach((line) => {
-        page.drawText(line, {
-          x: margin + 170,
-          y: vy,
-          size: bodySize,
-          font: helvetica,
-          color: INK,
-        })
-        vy -= bodySize + 2
-      })
-
-      y -= blockHeight + 6
-    })
-
-
-    y -= 6
-  })
+    y -= 4
+  }
 
   const bytes = await pdfDoc.save()
-  const outName = `${String(referenceId || 'mucm-application').replace(/[^\w.-]/g, '_')}.pdf`
+  const outName = `MUCM_Application_Summary_${String(referenceId || 'form').replace(/[^\w.-]/g, '_')}.pdf`
   downloadBlob(new Blob([bytes], { type: 'application/pdf' }), outName)
 }
 
+/**
+ * Download an application summary PDF. Uses the official overlay form when the
+ * template is available; otherwise generates a readable summary report.
+ */
+export async function downloadApplicationSummaryPdf({
+  referenceId,
+  formValues,
+  programOptions = [],
+  steps = applicationSteps,
+  uploadedDocumentKeys = [],
+  uploadedDocuments = [],
+  fetchHeaders = {},
+}) {
+  if (!formValues || typeof formValues !== 'object') {
+    throw new Error('Application data is required to generate the PDF.')
+  }
+
+  try {
+    const usedOfficial = await downloadOfficialFilledApplicationPdf({
+      referenceId,
+      formValues,
+      programOptions,
+      uploadedDocumentKeys,
+      uploadedDocuments,
+      fetchHeaders,
+    })
+    if (usedOfficial) {
+      return
+    }
+  } catch {
+    // Fall through to generated summary when template fetch/fill fails.
+  }
+
+  await downloadApplicationSummaryReportPdf({
+    referenceId,
+    formValues,
+    programOptions,
+    steps,
+  })
+}

@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import AppModuleTopBar from '../components/application/AppModuleTopBar.jsx'
+import MobileModuleNav from '../components/application/MobileModuleNav.jsx'
 import StepSidebar from '../components/application/StepSidebar.jsx'
 import ProfileDropdown from '../components/common/ProfileDropdown.jsx'
 import PrimaryButton from '../components/common/PrimaryButton.jsx'
 import { apiUrl } from '../config/baseUrl.js'
-import { applicationSteps } from '../data/applicationSteps.js'
-import { isFieldVisible } from '../utils/formVisibility.js'
+import { buildApplicationSteps } from '../data/applicationSteps.js'
+import { useDropdownOptions } from '../hooks/useDropdownOptions.js'
+import {
+  getRepeatableDisplayRows,
+  isFieldVisibleForSubmissionReview,
+} from '../utils/formVisibility.js'
+import { buildHydrationPatchFromFullApplication } from '../utils/applicationApiHydration.js'
+import SignatureReviewValue, {
+  getSignatureImageSrc,
+  isSignatureTypedField,
+  isSignatureUploadField,
+} from '../components/common/SignatureReviewValue.jsx'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
 import {
   clearApplicantHydrationSessionFlags,
@@ -14,12 +26,10 @@ import {
   submissionsStorageKey,
 } from '../utils/applicantStorageKeys.js'
 import { downloadApplicationSummaryPdf } from '../utils/applicationFormPdf.js'
+import { asText } from '../utils/pdfDrawHelpers.js'
 import { downloadPrefilledStep7Pdf } from '../utils/step7SponsorPdf.js'
-import { buildPdfSections } from '../utils/pdfDataBuilders.js'
 import { Download, FileText, Landmark } from 'lucide-react'
 
-const crestLogo =
-  'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
 const LEGACY_SUBMISSIONS_KEY = 'mucm-submitted-applications'
 const BACKEND_DOCUMENT_LABELS = {
   passport: 'Passport',
@@ -108,24 +118,71 @@ async function fetchApplicationRowIdByApplicationId(applicationId, authHeader, p
   return ''
 }
 
-function SubmissionAnswers({ formValues }) {
+async function fetchApplicationFullByRowId(rowId, authHeader, paths) {
+  const id = String(rowId || '').trim()
+  if (!id) return null
+
+  for (const basePath of paths) {
+    try {
+      const response = await fetch(
+        apiUrl(`${basePath}/${encodeURIComponent(id)}?full=true`),
+        { headers: authHeader },
+      )
+      const data = await response.json().catch(() => ({}))
+      if (response.ok && data.success !== false) {
+        return data.data ?? data.application ?? data
+      }
+    } catch {
+      continue
+    }
+  }
+  return null
+}
+
+function mergeTransferCredits(snapshot = [], fromApi = []) {
+  const snap = Array.isArray(snapshot) ? snapshot.filter((row) =>
+    Object.values(row || {}).some((v) => String(v ?? '').trim() !== ''),
+  ) : []
+  if (snap.length > 0) return snap
+  return Array.isArray(fromApi) ? fromApi : []
+}
+
+function renderSubmissionAnswerValue(field, rawValue) {
+  if (isSignatureTypedField(field) || isSignatureUploadField(field)) {
+    return <SignatureReviewValue field={field} value={rawValue} align="left" compact />
+  }
+
+  if (field.type === 'file' && getSignatureImageSrc(rawValue)) {
+    return <SignatureReviewValue field={field} value={rawValue} align="left" compact />
+  }
+
+  return (
+    <p className="text-sm whitespace-pre-wrap text-[#0A1628]/78">
+      {getSingleFieldDisplayValue(field, rawValue)}
+    </p>
+  )
+}
+
+function SubmissionAnswers({ formValues, steps, programTypeOptions }) {
+  const reviewOptions = useMemo(
+    () => ({ programOptions: programTypeOptions ?? [] }),
+    [programTypeOptions],
+  )
+
   const stepsWithFields = useMemo(() => {
     if (!formValues || typeof formValues !== 'object') {
       return []
     }
-    return applicationSteps
+    return steps
       .filter((s) => s.id !== 'reviewSubmit')
       .map((step) => ({
         step,
-        visibleFields: step.fields.filter(
-          (field) =>
-            field.type !== 'note' &&
-            !String(field.name).startsWith('__') &&
-            isFieldVisible(field, formValues),
+        visibleFields: step.fields.filter((field) =>
+          isFieldVisibleForSubmissionReview(field, formValues, reviewOptions),
         ),
       }))
       .filter(({ visibleFields }) => visibleFields.length > 0)
-  }, [formValues])
+  }, [formValues, steps, reviewOptions])
 
   if (stepsWithFields.length === 0) {
     return null
@@ -160,8 +217,8 @@ function SubmissionAnswers({ formValues }) {
                     <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#0A1628]/45">
                       {field.sectionTitle ?? field.label ?? field.name}
                     </p>
-                    {Array.isArray(formValues[field.name]) && formValues[field.name].length > 0 ? (
-                      formValues[field.name].map((row, rowIndex) => (
+                    {getRepeatableDisplayRows(field, formValues).length > 0 ? (
+                      getRepeatableDisplayRows(field, formValues).map((row, rowIndex) => (
                         <div
                           key={`${field.name}-row-${rowIndex}`}
                           className="rounded-lg border border-[#0A1628]/8 bg-[#F8F7F4] px-3 py-2.5"
@@ -193,22 +250,7 @@ function SubmissionAnswers({ formValues }) {
                     <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#0A1628]/45">
                       {field.label}
                     </p>
-                    {field.type === 'file' &&
-                    typeof formValues[field.name] === 'string' &&
-                    formValues[field.name].startsWith('data:image/') ? (
-                      <div className="space-y-1.5">
-                        <p className="text-xs text-[#0A1628]/55">Uploaded signature</p>
-                        <img
-                          src={formValues[field.name]}
-                          alt=""
-                          className="max-h-24 max-w-[240px] rounded-lg border border-[#0A1628]/10 bg-white object-contain"
-                        />
-                      </div>
-                    ) : (
-                      <p className="text-sm whitespace-pre-wrap text-[#0A1628]/78">
-                        {getSingleFieldDisplayValue(field, formValues[field.name])}
-                      </p>
-                    )}
+                    {renderSubmissionAnswerValue(field, formValues[field.name])}
                   </div>
                 )}
               </div>
@@ -222,6 +264,17 @@ function SubmissionAnswers({ formValues }) {
 
 function SubmittedApplicationsPage() {
   const navigate = useNavigate()
+  const { options: dynOptions, programs: dynPrograms, docRequirements: dynDocRequirements } =
+    useDropdownOptions()
+  const dynamicSteps = useMemo(
+    () => buildApplicationSteps(dynOptions, dynPrograms, dynDocRequirements),
+    [dynOptions, dynPrograms, dynDocRequirements],
+  )
+  const programTypeOptions = useMemo(() => {
+    const academicStep = dynamicSteps.find((s) => s.id === 'academicBackground')
+    return academicStep?.fields.find((f) => f.name === 'programType')?.options ?? []
+  }, [dynamicSteps])
+
   const [activeModule, setActiveModule] = useState('Submitted Applications')
   const authSession = (() => {
     try {
@@ -285,6 +338,7 @@ function SubmittedApplicationsPage() {
   const [pendingUploadDocumentType, setPendingUploadDocumentType] = useState('')
   const [replaceBusy, setReplaceBusy] = useState(false)
   const [replaceNotice, setReplaceNotice] = useState('')
+  const [apiFormPatch, setApiFormPatch] = useState({})
 
   function getAuthHeader() {
     return authToken ? { Authorization: `Bearer ${authToken}` } : {}
@@ -320,6 +374,42 @@ function SubmittedApplicationsPage() {
       cancelled = true
     }
   }, [selectedSubmission, authToken])
+
+  useEffect(() => {
+    if (!resolvedRowId || !authToken) {
+      setApiFormPatch({})
+      return undefined
+    }
+
+    let cancelled = false
+    ;(async () => {
+      const full = await fetchApplicationFullByRowId(
+        resolvedRowId,
+        getAuthHeader(),
+        buildApplicationsPaths(),
+      )
+      if (cancelled || !full) {
+        if (!cancelled) setApiFormPatch({})
+        return
+      }
+      const { patch } = buildHydrationPatchFromFullApplication(full, dynamicSteps.length)
+      if (!cancelled) setApiFormPatch(patch)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [resolvedRowId, authToken, dynamicSteps.length])
+
+  const displayFormValues = useMemo(() => {
+    const base = selectedSubmission?.formValues ?? {}
+    const merged = { ...base, ...apiFormPatch }
+    merged.transferCredits = mergeTransferCredits(
+      base.transferCredits,
+      apiFormPatch.transferCredits,
+    )
+    return merged
+  }, [selectedSubmission?.formValues, apiFormPatch])
 
   async function postSubmittedDocumentUpload(rowId, documentType, file) {
     const paths = buildApplicationsPaths()
@@ -492,78 +582,67 @@ function SubmittedApplicationsPage() {
   }
 
   async function handleDownloadSummary(submission) {
-    if (!submission?.formValues) return
-    const sections = buildPdfSections(submission.formValues)
-    await downloadApplicationSummaryPdf({
-      referenceId: submission.id || 'mucm-application',
-      sections,
-    })
+    if (!displayFormValues || Object.keys(displayFormValues).length === 0) return
+    const uploadedDocumentKeys = displayedDocuments
+      .filter((doc) => asText(doc.value) || asText(doc.url))
+      .map((doc) => doc.key)
+      .filter(Boolean)
+    try {
+      await downloadApplicationSummaryPdf({
+        referenceId: submission.id || submission.applicationRowId || 'mucm-application',
+        formValues: displayFormValues,
+        programOptions: programTypeOptions,
+        steps: dynamicSteps,
+        uploadedDocumentKeys,
+        uploadedDocuments: displayedDocuments.map((doc) => ({
+          key: doc.key,
+          url: doc.url,
+          value: doc.value,
+          formKey: FORM_FIELD_TO_UPLOAD_DOCUMENT_TYPE[doc.name] || doc.name,
+        })),
+        fetchHeaders: getAuthHeader(),
+      })
+    } catch (err) {
+      console.error(err)
+      window.alert(err?.message || 'Unable to generate application PDF. Please try again.')
+    }
   }
 
-  async function handleDownloadSponsorForm(submission) {
-    if (!submission?.formValues) return
+  async function handleDownloadSponsorForm() {
+    if (!displayFormValues || Object.keys(displayFormValues).length === 0) return
     const downloadLink = {
       href: '/forms/mucm-step-7-sponsor-financial-declaration.pdf',
       fileName: 'mucm-step-7-sponsor-financial-declaration.pdf',
       label: 'Download Step 7 sponsor form (PDF)',
       prefillFromValues: true,
     }
-    await downloadPrefilledStep7Pdf(submission.formValues, downloadLink)
+    await downloadPrefilledStep7Pdf(displayFormValues, downloadLink)
   }
 
   return (
     <main className="min-h-screen bg-background">
-      <header className="page-gutter-x border-b border-border bg-card/95 py-3 backdrop-blur-md lg:hidden">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <img
-              src={crestLogo}
-              alt="MUCM Crest"
-              className="h-10 w-10 rounded-lg border border-border bg-card p-1 shadow-sm"
-            />
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#0A1628]/45">
-                APPLICATION ARCHIVE
-              </p>
-              <h1 className="text-base text-[#0A1628] [font-family:'DM_Serif_Display',serif] sm:text-lg">
-                Submitted Applications
-              </h1>
-            </div>
-          </div>
-          <ProfileDropdown email={userEmail} onLogout={handleLogout} />
-        </div>
-      </header>
+      <AppModuleTopBar title={activeModule} compact className="py-3 lg:hidden">
+        <ProfileDropdown email={userEmail} onLogout={handleLogout} />
+      </AppModuleTopBar>
+
+      <MobileModuleNav activeModule={activeModule} onModuleChange={handleModuleChange} />
 
       <div className="grid min-h-screen grid-cols-1 lg:h-[100dvh] lg:min-h-0 lg:grid-cols-[320px_minmax(0,1fr)] lg:overflow-hidden">
         <StepSidebar activeModule={activeModule} onModuleChange={handleModuleChange} />
 
         <section className="flex flex-col lg:h-[100dvh] lg:overflow-y-auto">
-          <div className="page-gutter-x hidden items-center justify-between border-b border-border bg-card/95 py-2.5 backdrop-blur-md lg:sticky lg:top-0 lg:z-20 lg:flex">
-            <div className="flex items-center gap-3">
-              <img
-                src={crestLogo}
-                alt="MUCM Crest"
-                className="h-10 w-10 rounded-xl border border-border bg-card p-1 shadow-sm"
-              />
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#0A1628]/45">
-                  APPLICATION ARCHIVE
-                </p>
-                <h1 className="text-xl text-[#0A1628] [font-family:'DM_Serif_Display',serif]">
-                  Submitted Applications
-                </h1>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <PrimaryButton variant="outline" type="button" onClick={() => navigate('/before-you-begin')}>
-                Back
-              </PrimaryButton>
-              <PrimaryButton type="button" onClick={() => navigate('/application')}>
-                New Application
-              </PrimaryButton>
-              <ProfileDropdown email={userEmail} onLogout={handleLogout} />
-            </div>
-          </div>
+          <AppModuleTopBar
+            title={activeModule}
+            className="hidden lg:sticky lg:top-0 lg:z-20 lg:flex"
+          >
+            <PrimaryButton variant="outline" type="button" onClick={() => navigate('/before-you-begin')}>
+              Back
+            </PrimaryButton>
+            <PrimaryButton type="button" onClick={() => navigate('/application')}>
+              New Application
+            </PrimaryButton>
+            <ProfileDropdown email={userEmail} onLogout={handleLogout} />
+          </AppModuleTopBar>
 
           <div className="page-gutter-x space-y-3 py-3 sm:py-5 lg:py-6">
             {submissions.length === 0 ? (
@@ -646,10 +725,10 @@ function SubmittedApplicationsPage() {
                             Name: {selectedSubmission.applicantName}
                           </p>
                           <p className="text-sm text-[#0A1628]/75">
-                            Email: {selectedSubmission.formValues?.email || 'Not provided'}
+                            Email: {displayFormValues?.email || 'Not provided'}
                           </p>
                           <p className="text-sm text-[#0A1628]/75">
-                            Phone: {selectedSubmission.formValues?.phoneMobile || 'Not provided'}
+                            Phone: {displayFormValues?.phoneMobile || 'Not provided'}
                           </p>
                         </div>
                         <div className="rounded-xl border border-border bg-card p-3">
@@ -665,7 +744,11 @@ function SubmittedApplicationsPage() {
                         </div>
                       </div>
 
-                      <SubmissionAnswers formValues={selectedSubmission.formValues} />
+                      <SubmissionAnswers
+                        formValues={displayFormValues}
+                        steps={dynamicSteps}
+                        programTypeOptions={programTypeOptions}
+                      />
 
                       {/* Download Center */}
                       <div className="mt-3 overflow-hidden rounded-xl border border-[#D4A843]/25 bg-gradient-to-br from-card via-secondary/40 to-[#fff8e8]/50 shadow-sm">
@@ -680,7 +763,7 @@ function SubmittedApplicationsPage() {
                         <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 sm:p-5">
 
                           {/* Sponsor Form Download (Conditional) */}
-                          {['B', 'C'].includes(selectedSubmission.formValues?.paymentOption) ? (
+                          {['B', 'C'].includes(displayFormValues?.paymentOption) ? (
                             <div className="group relative flex flex-col justify-between rounded-xl border border-border bg-card p-4 transition-all hover:border-[#D4A843]/40 hover:shadow-md">
                               <div className="flex items-start gap-3">
                                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600 shadow-sm transition group-hover:bg-[#D4A843]/15 group-hover:text-[#b98a22]">
@@ -695,7 +778,7 @@ function SubmittedApplicationsPage() {
                               </div>
                               <button
                                 type="button"
-                                onClick={() => handleDownloadSponsorForm(selectedSubmission)}
+                                onClick={handleDownloadSponsorForm}
                                 className="mt-4 flex items-center justify-center gap-2 rounded-lg border border-[#D4A843]/45 bg-gradient-to-r from-[#D4A843]/12 to-[#D4A843]/5 px-4 py-2.5 text-sm font-semibold text-[#5c4510] shadow-sm transition hover:border-[#D4A843]/70 hover:from-[#D4A843]/18 hover:to-[#D4A843]/8"
                               >
                                 <Download className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
