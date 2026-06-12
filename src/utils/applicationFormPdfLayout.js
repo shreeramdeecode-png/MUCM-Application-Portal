@@ -141,7 +141,12 @@ export const PAGE2_FIELDS = {
   motherEmail: p2Cell(221.8, 352.1, 152.0, 162.0),
   motherPhone: p2Cell(393.3, 525.1, 152.0, 162.0),
   year: line(221.8, 352.1, 771.4),
-  otherLanguages: line(50.4, 525.1, 786.0),
+}
+
+/** Signature write areas on page 6 (above underline rules). */
+export const PAGE6_SIGNATURE_BOXES = {
+  financial: box(52.5, 266.4, 285, 302.4),
+  applicant: box(50.4, 266.4, 615, 632.3),
 }
 
 export const EDU_COLS = [
@@ -153,9 +158,52 @@ export const EDU_COLS = [
   { x0: 477.9, x1: 555.2 },
 ]
 
-export const EDU_FIRST_ROW = { y0: 232.8, y1: 275.7 }
+/** Bottom edge of the education header label row (Fitz y↓). */
+export const EDU_HEADER_BOTTOM = 275.7
 
+/** Horizontal rules below each education data row (Fitz y↓). */
 export const EDU_ROW_LINES = [314.7, 354.1, 393.4, 432.8, 472.1]
+
+/** Data rows only — header labels sit above EDU_HEADER_BOTTOM and must not be covered. */
+export function getEducationRowBounds(rowIndex) {
+  const tops = [EDU_HEADER_BOTTOM, ...EDU_ROW_LINES.slice(0, -1)]
+  const bottoms = EDU_ROW_LINES
+  if (rowIndex < 0 || rowIndex >= tops.length) return null
+  return { y0: tops[rowIndex], y1: bottoms[rowIndex] }
+}
+
+/** Page 5 document verification table rows (Fitz y↓). */
+export const PAGE5_DOC_ROWS = [
+  { y0: 61.2, y1: 113.4 },
+  { y0: 113.4, y1: 142.0 },
+  { y0: 142.0, y1: 170.5 },
+  { y0: 170.5, y1: 199.1 },
+  { y0: 199.1, y1: 227.6 },
+  { y0: 227.6, y1: 256.2 },
+  { y0: 256.2, y1: 284.8 },
+]
+
+/** Horizontal center of the RECEIVED column on page 5. */
+export const PAGE5_DOC_RECEIVED_X = 285
+
+/** Form field keys aligned with PAGE5_DOC_ROWS order. */
+export const PAGE5_DOC_FORM_KEYS = [
+  'passport',
+  'bankStatement',
+  'preMedTranscript',
+  'grade11Transcript',
+  'cv',
+  'examResults',
+  'otherDocuments',
+]
+
+/** Form keys that map to the "Other Documents" verification row. */
+export const PAGE5_OTHER_DOCUMENT_KEYS = [
+  'otherProfessionalTranscripts',
+  'passportPhoto',
+  'sponsorSignedFinancialForm',
+  'reviewSignatureUpload',
+]
 
 const transferLine = (lineY) => ({
   inst: line(40.1, 271.9, lineY),
@@ -163,22 +211,28 @@ const transferLine = (lineY) => ({
 })
 
 export const TRANSFER_ROWS = [
-  { inst: line(40.1, 271.9, 157.9), courses: line(271.9, 555.2, 157.9) },
   transferLine(196.9),
   transferLine(236.3),
   transferLine(275.6),
   transferLine(315.0),
 ]
 
+/** Wipe the right portion of header line 1: "(MCAT/" text + NEW badge (same line as "STANDARDIZED TEST"). */
+export const STANDARDIZED_TEST_LINE1_RIGHT = { x0: 462, y0: 42, x1: 525, y1: 56 }
+/** Wipe the full width of header line 2: "NEET/UCAT)" wrap. */
+export const STANDARDIZED_TEST_LINE2 = { x0: 394, y0: 52, x1: 525, y1: 67 }
+
 export const PAGE3_FIELDS = {
   englishTestScore: line(221.8, 352.1, 67.6),
-  standardizedTest: line(393.3, 525.1, 76.4),
-  disciplineExplain: box(40.4, 554.8, 404.6, 443.4),
-  disabilityExplain: box(40.4, 554.8, 685.1, 770.1),
+  /** Score line — sits on the second line inside the redrawn column header cell. */
+  standardizedTest: line(393.3, 524, 70.0),
+  disciplineExplain: box(40.4, 554.8, 534.0, 612.0),
 }
 
 export const PAGE4_FIELDS = {
   howHeardOther: line(122, 266, 177.0),
+  /** "IF 'YES' TO EITHER, PLEASE DESCRIBE:" box at very top of page 4 */
+  disabilityExplain: box(40.4, 554.8, 42.0, 110.0),
 }
 
 export const PAGE5_FIELDS = {
@@ -191,7 +245,6 @@ export const PAGE5_FIELDS = {
   sponsorPhone: line(390.2, 515.8, 727.2),
   sponsorRelation: line(59.6, 266.4, 767.9),
   sponsorCountry: line(307.6, 515.8, 767.9),
-  selfFundedSource: box(40.4, 554.8, 500.6, 541.3),
 }
 
 export const PAGE6_FIELDS = {

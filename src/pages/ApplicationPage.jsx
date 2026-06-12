@@ -24,6 +24,7 @@ import { usePersistentState } from '../hooks/usePersistentState.js'
 import { useDropdownOptions } from '../hooks/useDropdownOptions.js'
 import { getAutofillStudentInfo } from '../utils/studentInfoAutofill.js'
 import { downloadApplicationSummaryPdf } from '../utils/applicationFormPdf.js'
+import { hasUploadedValue } from '../utils/pdfDrawHelpers.js'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
 import { getSelectValues, isFieldVisible, rowHasValues } from '../utils/formVisibility.js'
 import {
@@ -280,6 +281,7 @@ function ApplicationPage() {
   )
   const [lastSubmissionId, setLastSubmissionId] = useState('')
   const [submittedSnapshot, setSubmittedSnapshot] = useState(null)
+  const [submittedDocuments, setSubmittedDocuments] = useState(null)
   const [faqApiRows, setFaqApiRows] = useState([])
   const [faqLoading, setFaqLoading] = useState(false)
   const [faqError, setFaqError] = useState('')
@@ -1894,6 +1896,14 @@ function ApplicationPage() {
       markJustSubmitted(applicantScope)
       setCooldownNotice({ isBlocked: false, nextAllowedAt: null, open: false })
       setSubmittedSnapshot(snapshot)
+      setSubmittedDocuments(
+        documentFields.map((field) => ({
+          name: field.name,
+          label: field.label,
+          key: DOCUMENT_TYPE_BY_FIELD[field.name] || field.name,
+          value: formValues[field.name] ?? '',
+        })),
+      )
       setLastSubmissionId(applicationId)
       setSubmitted(true)
       // Clear draft after success state is set so the success screen always renders.
@@ -1916,6 +1926,7 @@ function ApplicationPage() {
     setFormValues(initialForm)
     setSubmitted(false)
     setSubmittedSnapshot(null)
+    setSubmittedDocuments(null)
     setLastSubmissionId('')
     setActiveApplication({ ...EMPTY_ACTIVE_APPLICATION })
     setValidationErrors({})
@@ -1947,6 +1958,25 @@ function ApplicationPage() {
       window.alert('Application data is not available for download.')
       return
     }
+
+    const documentSource =
+      submittedDocuments ??
+      (dynamicSteps
+        .find((step) => step.id === 'documents')
+        ?.fields.filter((field) => field.type === 'file')
+        .map((field) => ({
+          name: field.name,
+          label: field.label,
+          key: DOCUMENT_TYPE_BY_FIELD[field.name] || field.name,
+          value: valuesForPdf[field.name] ?? '',
+        })) ??
+        [])
+
+    const uploadedDocumentKeys = documentSource
+      .filter((doc) => hasUploadedValue(doc.value))
+      .map((doc) => doc.key)
+      .filter(Boolean)
+
     setIsDownloadingSummary(true)
     try {
       await downloadApplicationSummaryPdf({
@@ -1954,6 +1984,12 @@ function ApplicationPage() {
         formValues: valuesForPdf,
         programOptions: programTypeOptions,
         steps: dynamicSteps,
+        uploadedDocumentKeys,
+        uploadedDocuments: documentSource.map((doc) => ({
+          key: doc.key,
+          value: doc.value,
+          formKey: doc.name,
+        })),
         fetchHeaders: getAuthHeader(),
       })
     } catch (err) {

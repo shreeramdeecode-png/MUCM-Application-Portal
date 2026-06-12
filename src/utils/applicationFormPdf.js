@@ -2,7 +2,7 @@ import fontkit from '@pdf-lib/fontkit'
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
 import { applicationSteps } from '../data/applicationSteps.js'
 import { fillRedesignedApplicationPdf } from './applicationFormPdfFill.js'
-import { loadPassportPhotoPayload } from './applicationFormPdfImage.js'
+import { loadPassportPhotoPayload, loadSignaturePayload } from './applicationFormPdfImage.js'
 import { buildPdfSections } from './pdfDataBuilders.js'
 import { asText, downloadBlob } from './pdfDrawHelpers.js'
 
@@ -19,6 +19,20 @@ const SECTION_SIZE = 11
 const LABEL_SIZE = 9
 const BODY_SIZE = 9
 const LINE_GAP = 4
+
+const SCRIPT_FONT_URL = 'https://fonts.gstatic.com/s/mrdafoe/v15/lJwE-pIzkS5NXuMMrGiq.ttf'
+
+async function embedScriptSignatureFont(pdfDoc) {
+  try {
+    const response = await fetch(SCRIPT_FONT_URL)
+    if (response.ok) {
+      return await pdfDoc.embedFont(await response.arrayBuffer())
+    }
+  } catch {
+    // fall back to built-in oblique
+  }
+  return pdfDoc.embedFont(StandardFonts.HelveticaOblique)
+}
 
 function wrapLines(text, font, size, maxWidth) {
   const raw = asText(text)
@@ -59,18 +73,24 @@ async function downloadOfficialFilledApplicationPdf({
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold)
 
-  const passportPhotoPayload = await loadPassportPhotoPayload(formValues, {
-    fetchHeaders,
-    uploadedDocuments,
-  })
+  const [passportPhotoPayload, signaturePayload, scriptFont] = await Promise.all([
+    loadPassportPhotoPayload(formValues, {
+      fetchHeaders,
+      uploadedDocuments,
+    }),
+    loadSignaturePayload(formValues, { fetchHeaders }),
+    embedScriptSignatureFont(pdfDoc),
+  ])
 
   await fillRedesignedApplicationPdf(pdfDoc, formValues, {
     helvetica,
     helveticaBold,
+    scriptFont,
     programOptions,
     referenceId,
     uploadedDocumentKeys,
     passportPhotoPayload,
+    signaturePayload,
   })
 
   const bytes = await pdfDoc.save({ useObjectStreams: false })

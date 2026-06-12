@@ -3,9 +3,14 @@ import {
   CB,
   DOC_CHECKLIST_FIELD_TO_CB,
   EDU_COLS,
-  EDU_FIRST_ROW,
   EDU_ROW_LINES,
+  getEducationRowBounds,
   PAGE1_FIELDS,
+  PAGE5_DOC_FORM_KEYS,
+  PAGE5_DOC_RECEIVED_X,
+  PAGE5_DOC_ROWS,
+  PAGE5_OTHER_DOCUMENT_KEYS,
+  PAGE6_SIGNATURE_BOXES,
   PAGE1_PASSPORT_PHOTO,
   PAGE2_FAMILY_INPUT_COVERS,
   PAGE2_FAMILY_ROW_BOTTOM_DIVIDER,
@@ -13,6 +18,8 @@ import {
   PAGE2_FIELDS,
   PAGE3_FIELDS,
   PAGE4_FIELDS,
+  STANDARDIZED_TEST_LINE1_RIGHT,
+  STANDARDIZED_TEST_LINE2,
   PAGE5_FIELDS,
   PAGE6_FIELDS,
   TRANSFER_ROWS,
@@ -25,18 +32,34 @@ import {
   drawInSlot,
   drawInSlotClean,
   drawMark,
+  drawMarkInCell,
   drawMultilineInSlot,
   drawMultilineInSlotFromBottom,
   drawPassportPhotoInBox,
+  drawSignatureInBox,
   formatDatePdf,
   formatMonthPdf,
   hasUploadedValue,
   joinParts,
+  resolvePaymentOption,
   resolveProgramLabel,
 } from './pdfDrawHelpers.js'
 
 const BODY = 8.5
 const SMALL = 8
+
+/** Convert an underline slot into a shallow box for clean overlays. */
+function toLineBox(slot) {
+  const lineY = slot.line ?? slot.y1
+  if (lineY == null || slot.x0 == null || slot.x1 == null) return slot
+  return {
+    x0: slot.x0,
+    x1: slot.x1,
+    y0: lineY - 14,
+    y1: lineY,
+    kind: 'box',
+  }
+}
 
 const BACKEND_KEY_TO_FORM = {
   passport: 'passport',
@@ -103,9 +126,6 @@ function markEnglishProficiency(page, value, font) {
   if (/native/i.test(v)) drawMark(page, ...CB.p2EngNative, font)
   else if (/fluent/i.test(v)) drawMark(page, ...CB.p2EngFluent, font)
   else if (/intermediate/i.test(v)) drawMark(page, ...CB.p2EngIntermediate, font)
-  else if (/speaking|writing/i.test(v)) {
-    drawMark(page, ...CB.p2EngNative, font)
-  }
 }
 
 function markEnglishTest(page, testType, font) {
@@ -155,7 +175,24 @@ function markDocumentChecklist(page, uploadedFields, font) {
   }
 }
 
+function markPage5DocumentReceived(page, uploadedFields, font) {
+  const hasOther = PAGE5_OTHER_DOCUMENT_KEYS.some((key) => uploadedFields.has(key))
+
+  PAGE5_DOC_FORM_KEYS.forEach((key, index) => {
+    const row = PAGE5_DOC_ROWS[index]
+    if (!row) return
+    const isReceived =
+      key === 'otherDocuments' ? hasOther : uploadedFields.has(key)
+    if (isReceived) {
+      drawMarkInCell(page, PAGE5_DOC_RECEIVED_X, row.y0, row.y1, font)
+    }
+  })
+}
+
 function drawEducationRow(page, row, rowIndex, font) {
+  const rowBounds = getEducationRowBounds(rowIndex)
+  if (!rowBounds) return
+
   const institutionLine = joinParts(row.institution, row.address)
   const cols = [
     institutionLine,
@@ -165,15 +202,21 @@ function drawEducationRow(page, row, rowIndex, font) {
     row.fieldOfStudy,
     row.gpa,
   ]
+
   cols.forEach((text, colIndex) => {
     const col = EDU_COLS[colIndex]
-    if (!col) return
-    const slot =
-      rowIndex === 0
-        ? { x0: col.x0, x1: col.x1, kind: 'box', y0: EDU_FIRST_ROW.y0, y1: EDU_FIRST_ROW.y1 }
-        : { x0: col.x0, x1: col.x1, kind: 'line', line: EDU_ROW_LINES[rowIndex - 1] }
-    if (rowIndex > 0 && slot.line == null) return
-    drawInSlot(page, text, slot, font, SMALL)
+    if (!col || !asText(text)) return
+
+    const slot = {
+      x0: col.x0,
+      x1: col.x1,
+      y0: rowBounds.y0,
+      y1: rowBounds.y1,
+      kind: 'box',
+    }
+
+    coverFitzRect(page, col.x0 + 0.8, rowBounds.y0 + 1, col.x1 - 0.8, rowBounds.y1 - 1)
+    drawInSlotClean(page, text, slot, font, BODY)
   })
 }
 
@@ -183,8 +226,10 @@ function drawEducationRow(page, row, rowIndex, font) {
 export async function fillRedesignedApplicationPdf(pdfDoc, formValues, options = {}) {
   const helvetica = options.helvetica
   const helveticaBold = options.helveticaBold
+  const scriptFont = options.scriptFont ?? helvetica
   const programOptions = options.programOptions ?? []
   const passportPhotoPayload = options.passportPhotoPayload ?? null
+  const signaturePayload = options.signaturePayload ?? null
 
   const pages = pdfDoc.getPages()
   const p1 = pages[0]
@@ -281,7 +326,7 @@ export async function fillRedesignedApplicationPdf(pdfDoc, formValues, options =
   drawFitzHorizontalLine(p2, rowBottom.x0, rowBottom.x1, rowBottom.y)
 
   const educationRows = Array.isArray(v.educationEntries) ? v.educationEntries : []
-  educationRows.slice(0, 1 + EDU_ROW_LINES.length).forEach((row, index) => {
+  educationRows.slice(0, EDU_ROW_LINES.length).forEach((row, index) => {
     drawEducationRow(p2, row, index, helvetica)
   })
 
@@ -290,7 +335,6 @@ export async function fillRedesignedApplicationPdf(pdfDoc, formValues, options =
   markSemester(p2, v.semester, helveticaBold)
   drawInSlot(p2, v.year, PAGE2_FIELDS.year, helvetica, BODY)
   markEnglishProficiency(p2, v.englishProficiency, helveticaBold)
-  drawInSlot(p2, v.otherLanguagesSpoken, PAGE2_FIELDS.otherLanguages, helvetica, SMALL)
 
   // Page 3
   const transferRows = Array.isArray(v.transferCredits) ? v.transferCredits : []
@@ -304,6 +348,11 @@ export async function fillRedesignedApplicationPdf(pdfDoc, formValues, options =
   markEnglishTest(p3, v.englishTestType, helveticaBold)
   drawInSlot(p3, v.englishTestScore, PAGE3_FIELDS.englishTestScore, helvetica, BODY)
   if (v.hasStandardizedTest === true || asText(v.hasStandardizedTest).toLowerCase() === 'yes') {
+    // Keep "STANDARDIZED TEST" text; wipe "(MCAT/" + NEW badge (right of line 1) and "NEET/UCAT)" (line 2)
+    const l1 = STANDARDIZED_TEST_LINE1_RIGHT
+    const l2 = STANDARDIZED_TEST_LINE2
+    coverFitzRect(p3, l1.x0, l1.y0, l1.x1, l1.y1)
+    coverFitzRect(p3, l2.x0, l2.y0, l2.x1, l2.y1)
     drawInSlot(
       p3,
       joinParts(v.standardizedTestType, v.standardizedTestScore),
@@ -311,6 +360,7 @@ export async function fillRedesignedApplicationPdf(pdfDoc, formValues, options =
       helvetica,
       BODY,
     )
+    drawFitzHorizontalLine(p3, l2.x0, l2.x1, PAGE3_FIELDS.standardizedTest.line)
   }
 
   markYesNo(p3, v.hasBeenDisciplined, 'p3DiscYes', 'p3DiscNo', helveticaBold)
@@ -324,7 +374,7 @@ export async function fillRedesignedApplicationPdf(pdfDoc, formValues, options =
   )
   if (disciplineExplain) {
     drawMultilineInSlot(p3, disciplineExplain, PAGE3_FIELDS.disciplineExplain, helvetica, BODY, 5, {
-      labelReserve: 18,
+      labelReserve: 36,
     })
   }
 
@@ -333,69 +383,87 @@ export async function fillRedesignedApplicationPdf(pdfDoc, formValues, options =
     asText(v.requiresAccommodation).toLowerCase() === 'yes' ? v.accommodationDetails : '',
   )
   if (disabilityExplain) {
-    drawMultilineInSlot(p3, disabilityExplain, PAGE3_FIELDS.disabilityExplain, helvetica, BODY, 4, {
-      labelReserve: 18,
+    drawMultilineInSlot(p4, disabilityExplain, PAGE4_FIELDS.disabilityExplain, helvetica, BODY, 4, {
+      labelReserve: 36,
     })
   }
 
   markHowHeard(p4, v.howHeard, v.howHeardOther, helveticaBold)
   markDocumentChecklist(p4, uploadedFields, helveticaBold)
+  markPage5DocumentReceived(p5, uploadedFields, helveticaBold)
 
-  const payment = asText(v.paymentOption).toUpperCase()
-  if (payment === 'A') drawMark(p5, ...CB.p5PayA, helveticaBold)
-  else if (payment === 'B') drawMark(p5, ...CB.p5PayB, helveticaBold)
-  else if (payment === 'C') drawMark(p5, ...CB.p5PayC, helveticaBold)
-
+  const payment = resolvePaymentOption(v.paymentOption)
   const studentLineName = asText(v.studentName) || applicantFullName(v)
-  drawInSlot(p5, studentLineName, PAGE5_FIELDS.studentName, helvetica, BODY)
-  drawInSlot(p5, formatDatePdf(v.dateOfBirth), PAGE5_FIELDS.studentDob, helvetica, BODY)
-  drawInSlot(p5, v.email, PAGE5_FIELDS.studentEmail, helvetica, BODY)
-  drawInSlot(p5, v.phoneMobile || v.phoneHome, PAGE5_FIELDS.studentPhone, helvetica, BODY)
+  drawInSlotClean(p5, studentLineName, toLineBox(PAGE5_FIELDS.studentName), helvetica, BODY)
+  drawInSlotClean(p5, formatDatePdf(v.dateOfBirth), toLineBox(PAGE5_FIELDS.studentDob), helvetica, BODY)
+  drawInSlotClean(p5, v.email, toLineBox(PAGE5_FIELDS.studentEmail), helvetica, BODY)
+  drawInSlotClean(
+    p5,
+    v.phoneMobile || v.phoneHome,
+    toLineBox(PAGE5_FIELDS.studentPhone),
+    helvetica,
+    BODY,
+  )
 
   if (payment === 'B' || payment === 'C') {
     const sponsorName =
       payment === 'C'
         ? joinParts(v.orgName, v.orgContactPerson ? `(${v.orgContactPerson})` : '')
         : v.sponsorFullName
-    drawInSlot(p5, sponsorName, PAGE5_FIELDS.sponsorName, helvetica, BODY)
-    drawInSlot(p5, payment === 'C' ? v.orgEmail : v.sponsorEmail, PAGE5_FIELDS.sponsorEmail, helvetica, BODY)
-    drawInSlot(p5, payment === 'C' ? v.orgPhone : v.sponsorPhone, PAGE5_FIELDS.sponsorPhone, helvetica, BODY)
-    drawInSlot(
+    drawInSlotClean(p5, sponsorName, toLineBox(PAGE5_FIELDS.sponsorName), helvetica, BODY)
+    drawInSlotClean(
       p5,
-      payment === 'C' ? v.orgCountry : v.sponsorRelationship,
-      PAGE5_FIELDS.sponsorRelation,
+      payment === 'C' ? v.orgEmail : v.sponsorEmail,
+      toLineBox(PAGE5_FIELDS.sponsorEmail),
       helvetica,
       BODY,
     )
-    drawInSlot(
+    drawInSlotClean(
+      p5,
+      payment === 'C' ? v.orgPhone : v.sponsorPhone,
+      toLineBox(PAGE5_FIELDS.sponsorPhone),
+      helvetica,
+      BODY,
+    )
+    drawInSlotClean(
+      p5,
+      payment === 'C' ? v.orgCountry : v.sponsorRelationship,
+      toLineBox(PAGE5_FIELDS.sponsorRelation),
+      helvetica,
+      BODY,
+    )
+    drawInSlotClean(
       p5,
       payment === 'C'
         ? joinParts(v.orgAddress, v.orgCity, v.orgState, v.orgPostalCode)
         : joinParts(v.sponsorAddress, v.sponsorCity, v.sponsorState, v.sponsorPostalCode, v.sponsorCountry),
-      PAGE5_FIELDS.sponsorCountry,
+      toLineBox(PAGE5_FIELDS.sponsorCountry),
       helvetica,
       SMALL,
     )
   }
 
-  if (payment === 'A' && v.selfFundedSource) {
-    drawInSlot(p5, v.selfFundedSource, PAGE5_FIELDS.selfFundedSource, helvetica, SMALL)
-  }
-
-  const signatureName =
-    asText(v.reviewSignatureTyped) || asText(v.studentSignatureTyped) || studentLineName
+  if (payment === 'A') drawMark(p5, ...CB.p5PayA, helveticaBold)
+  else if (payment === 'B') drawMark(p5, ...CB.p5PayB, helveticaBold)
+  else if (payment === 'C') drawMark(p5, ...CB.p5PayC, helveticaBold)
 
   drawInSlot(p6, studentLineName, PAGE6_FIELDS.finStudentName, helvetica, BODY)
   if (payment === 'B' || payment === 'C') {
     const sponsorName = payment === 'C' ? v.orgName : v.sponsorFullName
     drawInSlot(p6, sponsorName, PAGE6_FIELDS.finSponsorName, helvetica, BODY)
   }
-  drawInSlot(p6, signatureName, PAGE6_FIELDS.finSignature, helvetica, BODY)
+  await drawSignatureInBox(p6, pdfDoc, PAGE6_SIGNATURE_BOXES.financial, signaturePayload, {
+    scriptFont,
+    fallbackFont: helvetica,
+  })
   drawInSlot(p6, formatDatePdf(v.certifyDate), PAGE6_FIELDS.finDate, helvetica, BODY)
 
   drawInSlot(p6, studentLineName, PAGE6_FIELDS.applicantName, helvetica, BODY)
   drawInSlot(p6, joinParts(v.city, v.country), PAGE6_FIELDS.applicantPlace, helvetica, BODY)
-  drawInSlot(p6, signatureName, PAGE6_FIELDS.applicantSignature, helvetica, BODY)
+  await drawSignatureInBox(p6, pdfDoc, PAGE6_SIGNATURE_BOXES.applicant, signaturePayload, {
+    scriptFont,
+    fallbackFont: helvetica,
+  })
   drawInSlot(
     p6,
     formatDatePdf(v.certifyDate) || formatDatePdf(v.sponsorCertifyDate),

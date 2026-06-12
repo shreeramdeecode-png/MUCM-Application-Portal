@@ -88,6 +88,12 @@ export function drawMark(page, cx, cy, font, size = 8) {
   })
 }
 
+/** Center an X inside a table cell (Fitz coords, y increases downward). */
+export function drawMarkInCell(page, cx, y0, y1, font, size = 8) {
+  const cy = y0 + (y1 - y0) * 0.62
+  drawMark(page, cx, cy, font, size)
+}
+
 export function drawFieldValue(page, text, fitzX, fitzBaseline, font, size, maxWidth) {
   const fitted = fitTextToWidth(text, font, size, maxWidth)
   if (!fitted) return
@@ -250,6 +256,33 @@ export function drawMultilineInSlotFromBottom(
   })
 }
 
+/** Draw uploaded signature image or script-style typed name in a box region. */
+export async function drawSignatureInBox(page, pdfDoc, box, payload, options = {}) {
+  if (!payload) return
+
+  const pad = 2
+  coverFitzRect(page, box.x0 + pad, box.y0 + pad, box.x1 - pad, box.y1 - pad)
+
+  if (payload.kind === 'image' && payload.bytes?.length) {
+    await drawPassportPhotoInBox(page, pdfDoc, box, payload)
+    return
+  }
+
+  const text = asText(payload.text)
+  if (!text) return
+
+  const scriptFont = options.scriptFont ?? options.fallbackFont
+  if (!scriptFont) return
+
+  const maxWidth = box.x1 - box.x0 - TEXT_PAD_X * 2
+  const size = Math.min(22, Math.max(14, (box.y1 - box.y0) * 0.85))
+  const fitted = fitTextToWidth(text, scriptFont, size, maxWidth)
+  const textWidth = scriptFont.widthOfTextAtSize(fitted, size)
+  const x = box.x0 + TEXT_PAD_X
+  const fitzBaseline = box.y0 + (box.y1 - box.y0) * 0.72
+  drawFieldValue(page, fitted, x, fitzBaseline, scriptFont, size, maxWidth)
+}
+
 export async function drawPassportPhotoInBox(page, pdfDoc, box, payload) {
   if (!payload?.bytes?.length) return
 
@@ -303,6 +336,19 @@ export function joinParts(...parts) {
 
 export function applicantFullName(values) {
   return joinParts(values.firstName, values.middleName, values.surname)
+}
+
+/** Map stored payment option values to PDF checkbox keys A | B | C. */
+export function resolvePaymentOption(value) {
+  const raw = asText(value)
+  if (!raw) return ''
+  const upper = raw.toUpperCase()
+  if (upper === 'A' || upper === 'B' || upper === 'C') return upper
+  const lower = raw.toLowerCase()
+  if (/self[\s-]?fund|option\s*a|pay.*myself/i.test(lower)) return 'A'
+  if (/individual|parent|relative|friend|option\s*b/i.test(lower)) return 'B'
+  if (/organization|organisation|option\s*c/i.test(lower)) return 'C'
+  return upper.charAt(0)
 }
 
 export function resolveProgramLabel(programType, programOptions = []) {
