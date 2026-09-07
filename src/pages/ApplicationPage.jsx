@@ -42,12 +42,14 @@ import {
   activeApplicationStorageKey,
   clearApplicantHydrationSessionFlags,
   clearApplicantLocalDrafts,
+  clearAuthSession,
   clearJustSubmitted,
   draftFormStorageKey,
   draftStepStorageKey,
   getApplicantStorageScope,
   markJustSubmitted,
   migrateApplicantDraftStorage,
+  readAuthSession,
   readJustSubmitted,
   submissionsStorageKey,
 } from '../utils/applicantStorageKeys.js'
@@ -135,11 +137,7 @@ function getSupportTicketStatusLabel(status) {
 }
 
 function getAuthSession() {
-  try {
-    return JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
-  } catch {
-    return {}
-  }
+  return readAuthSession()
 }
 
 function decodeJwtSub(token) {
@@ -2002,14 +2000,9 @@ function ApplicationPage() {
 
 
   function handleLogout() {
-    const session = getAuthSession()
-    const scope = getApplicantStorageScope(session)
-    clearApplicantHydrationSessionFlags(scope)
-    clearJustSubmitted()
     // Do not clear draft/active-application keys here — same user expects progress after logging back in.
     // Scoped storage keys already isolate drafts per account on shared browsers.
-    window.localStorage.removeItem('mucm-auth-session')
-    window.localStorage.removeItem('mucm-support-center-tab')
+    clearAuthSession(getAuthSession())
     navigate('/login')
   }
 
@@ -2040,6 +2033,7 @@ function ApplicationPage() {
         token: authToken,
         categoryId: ticketForm.categoryId,
         question,
+        citizenship: formValues.citizenship,
       })
       const latest = await fetchMySupportTickets({ userId: portalUserId, token: authToken })
       setTicketHistory(Array.isArray(latest) ? latest : [])

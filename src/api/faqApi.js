@@ -79,8 +79,9 @@ export async function fetchMySupportTickets({ userId, token }) {
   return Array.isArray(payload.data) ? payload.data : []
 }
 
-export async function createSupportTicket({ userId, token, categoryId, question }) {
+export async function createSupportTicket({ userId, token, categoryId, question, citizenship }) {
   const subject = String(question ?? '').trim().slice(0, 500)
+  const normalizedCitizenship = String(citizenship ?? '').trim()
   const payload = await fetchWith404Fallback(
     buildApiCandidates(`/portal-users/${encodeURIComponent(userId)}/support-tickets`),
     {
@@ -90,6 +91,8 @@ export async function createSupportTicket({ userId, token, categoryId, question 
         subject,
         message: question,
         ...(categoryId ? { category_id: categoryId } : {}),
+        // Lets the backend route/scope the ticket to admins responsible for this citizenship/region.
+        ...(normalizedCitizenship ? { citizenship: normalizedCitizenship } : {}),
       }),
     },
     'Failed to submit support ticket.',

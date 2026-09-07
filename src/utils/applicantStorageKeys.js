@@ -1,16 +1,57 @@
-function decodeJwtSub(token) {
-  if (!token || typeof token !== 'string') return ''
+export const AUTH_SESSION_STORAGE_KEY = 'mucm-auth-session'
+
+function decodeJwtPayload(token) {
+  if (!token || typeof token !== 'string') return null
   const parts = token.split('.')
-  if (parts.length < 2) return ''
+  if (parts.length < 2) return null
   try {
     const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
     const padded = `${base64}${'='.repeat((4 - (base64.length % 4 || 4)) % 4)}`
     const json = window.atob(padded)
-    const parsed = JSON.parse(json)
-    return String(parsed?.sub ?? '').trim()
+    return JSON.parse(json)
   } catch {
-    return ''
+    return null
   }
+}
+
+function decodeJwtSub(token) {
+  return String(decodeJwtPayload(token)?.sub ?? '').trim()
+}
+
+/** True when the JWT carries an `exp` claim that has already passed. Tokens without `exp` are treated as non-expiring here. */
+export function isTokenExpired(token) {
+  const exp = decodeJwtPayload(token)?.exp
+  if (!Number.isFinite(exp)) return false
+  return Date.now() >= exp * 1000
+}
+
+/** A session only counts as authenticated when it has a token and that token has not expired. */
+export function isAuthSessionValid(session = {}) {
+  const token = String(session?.token ?? '').trim()
+  return Boolean(session?.isAuthenticated && token && !isTokenExpired(token))
+}
+
+export function readAuthSession() {
+  if (typeof window === 'undefined') return {}
+  try {
+    return JSON.parse(window.localStorage.getItem(AUTH_SESSION_STORAGE_KEY) ?? '{}')
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Single source of truth for logging out: clears the auth session, tab-scoped hydration
+ * flags, and the support-center tab preference. Draft/application progress is kept so the
+ * same applicant sees it again after logging back in (scoped storage keeps accounts isolated).
+ */
+export function clearAuthSession(session = readAuthSession()) {
+  if (typeof window === 'undefined') return
+  const scope = getApplicantStorageScope(session)
+  clearApplicantHydrationSessionFlags(scope)
+  clearJustSubmitted()
+  window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY)
+  window.localStorage.removeItem('mucm-support-center-tab')
 }
 
 /**

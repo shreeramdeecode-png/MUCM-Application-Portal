@@ -20,9 +20,10 @@ import SignatureReviewValue, {
 } from '../components/common/SignatureReviewValue.jsx'
 import { getSingleFieldDisplayValue } from '../utils/submissionDisplay.js'
 import {
-  clearApplicantHydrationSessionFlags,
+  clearAuthSession,
   getApplicantStorageScope,
   migrateApplicantDraftStorage,
+  readAuthSession,
   submissionsStorageKey,
 } from '../utils/applicantStorageKeys.js'
 import { downloadApplicationSummaryPdf } from '../utils/applicationFormPdf.js'
@@ -137,6 +138,27 @@ async function fetchApplicationFullByRowId(rowId, authHeader, paths) {
     }
   }
   return null
+}
+
+async function fetchMyStatusNotifications(authHeader, paths) {
+  for (const basePath of paths) {
+    try {
+      const response = await fetch(apiUrl(`${basePath}/notifications/my`), { headers: authHeader })
+      const data = await response.json().catch(() => ({}))
+      if (response.ok && data.success !== false) {
+        return Array.isArray(data.data) ? data.data : []
+      }
+    } catch {
+      continue
+    }
+  }
+  return []
+}
+
+function resolveNotificationApplicationKey(row) {
+  return String(
+    row?.application_id ?? row?.applicationId ?? row?.app_id ?? row?.applicationRowId ?? '',
+  ).trim()
 }
 
 function mergeTransferCredits(snapshot = [], fromApi = []) {
@@ -276,13 +298,7 @@ function SubmittedApplicationsPage() {
   }, [dynamicSteps])
 
   const [activeModule, setActiveModule] = useState('Submitted Applications')
-  const authSession = (() => {
-    try {
-      return JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
-    } catch {
-      return {}
-    }
-  })()
+  const authSession = readAuthSession()
   migrateApplicantDraftStorage(authSession)
   const userEmail = authSession?.email ?? ''
   const authToken = String(authSession?.token ?? '').trim()
@@ -300,13 +316,44 @@ function SubmittedApplicationsPage() {
 
   const submissionsPersistKey = useMemo(() => submissionsStorageKey(applicantScope), [applicantScope])
 
+  // Local cache is per-device only, so a submission made on one browser/device would not show up
+  // on another. GET /api/v1/applications/mine is the cross-device source of truth for this account.
+  const [remoteApplications, setRemoteApplications] = useState([])
+
+  useEffect(() => {
+    if (!authToken) {
+      setRemoteApplications([])
+      return undefined
+    }
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        const response = await fetch(apiUrl('/api/v1/applications/mine'), {
+          headers: { Authorization: `Bearer ${authToken}` },
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!cancelled && response.ok && data.success !== false) {
+          setRemoteApplications(Array.isArray(data.data) ? data.data : [])
+        }
+      } catch {
+        // Network failure: fall back to whatever is cached locally on this device.
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [authToken])
+
   const submissions = useMemo(() => {
+    const byId = new Map()
+
     try {
       const scopedRaw = JSON.parse(window.localStorage.getItem(submissionsPersistKey) ?? '[]')
       const legacyRaw = JSON.parse(window.localStorage.getItem(LEGACY_SUBMISSIONS_KEY) ?? '[]')
       const scoped = Array.isArray(scopedRaw) ? scopedRaw : []
       const legacy = Array.isArray(legacyRaw) ? legacyRaw : []
-      const byId = new Map()
       for (const item of legacy) {
         if (item?.id && item.userEmail === userEmail) {
           byId.set(item.id, item)
@@ -317,15 +364,87 @@ function SubmittedApplicationsPage() {
           byId.set(item.id, item)
         }
       }
-      return [...byId.values()].sort((a, b) => {
-        const ta = new Date(a.submittedAt || 0).getTime()
-        const tb = new Date(b.submittedAt || 0).getTime()
-        return tb - ta
-      })
     } catch {
-      return []
+      // ignore corrupt local cache
     }
-  }, [submissionsPersistKey, userEmail])
+
+    // Fill in anything submitted on another device that isn't in this device's local cache yet.
+    // Drafts (submittedAt === null) are excluded — this page is for submitted applications only.
+    // Full form data for these gets hydrated separately via the resolvedRowId/apiFormPatch effect below.
+    for (const item of remoteApplications) {
+      const applicationId = String(item?.applicationId ?? '').trim()
+      if (!applicationId || !item?.submittedAt || byId.has(applicationId)) continue
+      byId.set(applicationId, {
+        id: applicationId,
+        applicationRowId: String(item?.id ?? ''),
+        submittedAt: item.submittedAt,
+        userEmail,
+        applicantName: `${item?.firstName ?? ''} ${item?.surname ?? ''}`.trim() || 'Applicant',
+        formValues: {},
+        documents: [],
+      })
+    }
+
+    return [...byId.values()].sort((a, b) => {
+      const ta = new Date(a.submittedAt || 0).getTime()
+      const tb = new Date(b.submittedAt || 0).getTime()
+      return tb - ta
+    })
+  }, [submissionsPersistKey, userEmail, remoteApplications])
+
+  // Same status feed the Notification module reads, reused here so each submitted application
+  // shows its own "Status changed: ..." badge without having to switch modules.
+  const [statusNotifications, setStatusNotifications] = useState([])
+
+  useEffect(() => {
+    if (!authToken) {
+      setStatusNotifications([])
+      return undefined
+    }
+
+    let cancelled = false
+    ;(async () => {
+      const rows = await fetchMyStatusNotifications(getAuthHeader(), buildApplicationsPaths())
+      if (!cancelled) setStatusNotifications(rows)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [authToken])
+
+  const submissionStatusLabelById = useMemo(() => {
+    const byApplicationKey = new Map()
+    for (const row of statusNotifications) {
+      const key = resolveNotificationApplicationKey(row)
+      if (!key) continue
+      const list = byApplicationKey.get(key) ?? []
+      list.push(row)
+      byApplicationKey.set(key, list)
+    }
+
+    const latestLabel = (rows) => {
+      const [latest] = [...rows].sort(
+        (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime(),
+      )
+      return latest?.status_label || latest?.status_key || ''
+    }
+
+    // Notifications without a linked application id — fall back to the most recent one when
+    // there's exactly one submission to attribute it to (the common single-application case).
+    const unlinked = statusNotifications.filter((row) => !resolveNotificationApplicationKey(row))
+    const fallbackLabel = submissions.length === 1 && unlinked.length > 0 ? latestLabel(unlinked) : ''
+
+    const map = new Map()
+    for (const submission of submissions) {
+      const matched = [
+        ...(byApplicationKey.get(String(submission.id)) ?? []),
+        ...(byApplicationKey.get(String(submission.applicationRowId)) ?? []),
+      ]
+      map.set(submission.id, matched.length > 0 ? latestLabel(matched) : fallbackLabel || 'Submitted')
+    }
+    return map
+  }, [statusNotifications, submissions])
 
   const [selectedSubmissionId, setSelectedSubmissionId] = useState(submissions[0]?.id ?? '')
   const selectedSubmission = submissions.find((item) => item.id === selectedSubmissionId) ?? submissions[0] ?? null
@@ -569,15 +688,12 @@ function SubmittedApplicationsPage() {
   }
 
   function handleLogout() {
-    const scope = getApplicantStorageScope({
+    clearAuthSession({
       userId: authSession?.userId,
       id: authSession?.id,
       email: authSession?.email,
       token: authToken,
     })
-    clearApplicantHydrationSessionFlags(scope)
-    window.localStorage.removeItem('mucm-auth-session')
-    window.localStorage.removeItem('mucm-support-center-tab')
     navigate('/login')
   }
 
@@ -689,6 +805,9 @@ function SubmittedApplicationsPage() {
                                     year: 'numeric',
                                   })}
                                 </p>
+                                <span className="mt-1.5 inline-flex items-center rounded-full bg-[#D4A843]/15 px-2 py-0.5 text-[10px] font-semibold text-[#7a5a14]">
+                                  Status changed: {submissionStatusLabelById.get(submission.id) || 'Submitted'}
+                                </span>
                               </div>
                               <div
                                 onClick={(e) => {

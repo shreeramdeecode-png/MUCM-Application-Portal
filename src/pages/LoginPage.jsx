@@ -128,7 +128,7 @@ function LoginPage({ onRequestOtp, onLogin }) {
               Secure Access
             </p>
             <h2 className="mt-1 text-3xl text-[#0A1628] [font-family:'DM_Serif_Display',serif]">
-              Login to your account
+              Access Your Account
             </h2>
             <p className="mt-1.5 text-base text-[#0A1628]/55">
               Enter your email and OTP to continue.

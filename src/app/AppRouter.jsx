@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import ApplicationPage from '../pages/ApplicationPage.jsx'
 import BeforeYouBeginPage from '../pages/BeforeYouBeginPage.jsx'
@@ -8,7 +8,16 @@ import SettingsPage from '../pages/SettingsPage.jsx'
 import SubmittedApplicationsPage from '../pages/SubmittedApplicationsPage.jsx'
 import { usePersistentState } from '../hooks/usePersistentState.js'
 import { apiUrl } from '../config/baseUrl.js'
-import { shouldSkipBeforeYouBegin } from '../utils/applicantStorageKeys.js'
+import {
+  AUTH_SESSION_STORAGE_KEY,
+  clearAuthSession,
+  isAuthSessionValid,
+  isTokenExpired,
+  shouldSkipBeforeYouBegin,
+} from '../utils/applicantStorageKeys.js'
+
+/** How often to re-check the stored token's expiry while the app is open in a tab. */
+const SESSION_EXPIRY_CHECK_MS = 60 * 1000
 
 function AuthenticatedHomeRedirect({ authSession }) {
   const sessionPayload = {
@@ -21,13 +30,31 @@ function AuthenticatedHomeRedirect({ authSession }) {
 }
 
 function AppRouter() {
-  const [authSession, setAuthSession] = usePersistentState('mucm-auth-session', {
+  const [authSession, setAuthSession] = usePersistentState(AUTH_SESSION_STORAGE_KEY, {
     isAuthenticated: false,
     email: '',
     token: '',
     userId: '',
   })
   const authPrefixRef = useRef(import.meta.env.VITE_AUTH_PREFIX || '/api/auth')
+  const isAuthenticated = isAuthSessionValid(authSession)
+
+  // Force logout as soon as the stored token expires, whether that happens while the tab is
+  // open (poll) or was already true from a previous visit (checked once on mount).
+  useEffect(() => {
+    if (!authSession.isAuthenticated) return undefined
+
+    function checkExpiry() {
+      if (isTokenExpired(authSession.token)) {
+        clearAuthSession(authSession)
+        setAuthSession({ isAuthenticated: false, email: '', token: '', userId: '' })
+      }
+    }
+
+    checkExpiry()
+    const intervalId = window.setInterval(checkExpiry, SESSION_EXPIRY_CHECK_MS)
+    return () => window.clearInterval(intervalId)
+  }, [authSession, setAuthSession])
 
   function getAuthPaths(endpoint) {
     const preferredPrefix = authPrefixRef.current || '/api/auth'
@@ -102,7 +129,7 @@ function AppRouter() {
       <Route
         path="/"
         element={
-          authSession.isAuthenticated ? (
+          isAuthenticated ? (
             <AuthenticatedHomeRedirect authSession={authSession} />
           ) : (
             <LoginPage
@@ -124,7 +151,7 @@ function AppRouter() {
       <Route
         path="/before-you-begin"
         element={
-          authSession.isAuthenticated ? (
+          isAuthenticated ? (
             <BeforeYouBeginPage />
           ) : (
             <Navigate to="/" replace />
@@ -134,7 +161,7 @@ function AppRouter() {
       <Route
         path="/application"
         element={
-          authSession.isAuthenticated ? (
+          isAuthenticated ? (
             <ApplicationPage />
           ) : (
             <Navigate to="/" replace />
@@ -144,7 +171,7 @@ function AppRouter() {
       <Route
         path="/profile"
         element={
-          authSession.isAuthenticated ? (
+          isAuthenticated ? (
             <ProfilePage />
           ) : (
             <Navigate to="/" replace />
@@ -154,7 +181,7 @@ function AppRouter() {
       <Route
         path="/settings"
         element={
-          authSession.isAuthenticated ? (
+          isAuthenticated ? (
             <SettingsPage />
           ) : (
             <Navigate to="/" replace />
@@ -164,7 +191,7 @@ function AppRouter() {
       <Route
         path="/submitted-applications"
         element={
-          authSession.isAuthenticated ? (
+          isAuthenticated ? (
             <SubmittedApplicationsPage />
           ) : (
             <Navigate to="/" replace />
@@ -174,7 +201,7 @@ function AppRouter() {
       <Route
         path="*"
         element={
-          authSession.isAuthenticated ? (
+          isAuthenticated ? (
             <AuthenticatedHomeRedirect authSession={authSession} />
           ) : (
             <Navigate to="/" replace />

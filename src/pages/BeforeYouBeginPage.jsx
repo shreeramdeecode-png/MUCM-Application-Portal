@@ -4,7 +4,7 @@ import PrimaryButton from '../components/common/PrimaryButton.jsx'
 import ProfileDropdown from '../components/common/ProfileDropdown.jsx'
 import DocumentListSection from '../components/landing/DocumentListSection.jsx'
 import { optionalDocuments, requiredDocuments } from '../data/documentChecklist.js'
-import { clearApplicantHydrationSessionFlags, getApplicantStorageScope, markBeforeYouBeginSeen, shouldSkipBeforeYouBegin } from '../utils/applicantStorageKeys.js'
+import { clearAuthSession, markBeforeYouBeginSeen, readAuthSession, shouldSkipBeforeYouBegin } from '../utils/applicantStorageKeys.js'
 
 const crestLogo =
   'https://d2xsxph8kpxj0f.cloudfront.net/310519663394975842/o5YxQXzG37vUfAnZtRoyQg/mucm-crest-logo_aac17a92.png'
@@ -12,22 +12,11 @@ const crestLogo =
 function BeforeYouBeginPage() {
   const navigate = useNavigate()
   const [checked, setChecked] = useState({})
-  const userEmail = (() => {
-    try {
-      return JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}').email ?? ''
-    } catch {
-      return ''
-    }
-  })()
+  const userEmail = readAuthSession().email ?? ''
 
   useEffect(() => {
-    try {
-      const session = JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
-      if (shouldSkipBeforeYouBegin(session)) {
-        navigate('/application', { replace: true })
-      }
-    } catch {
-      // ignore
+    if (shouldSkipBeforeYouBegin(readAuthSession())) {
+      navigate('/application', { replace: true })
     }
   }, [navigate, userEmail])
 
@@ -36,16 +25,7 @@ function BeforeYouBeginPage() {
   }
 
   function handleLogout() {
-    let session = {}
-    try {
-      session = JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
-    } catch {
-      session = {}
-    }
-    const scope = getApplicantStorageScope(session)
-    clearApplicantHydrationSessionFlags(scope)
-    window.localStorage.removeItem('mucm-auth-session')
-    window.localStorage.removeItem('mucm-support-center-tab')
+    clearAuthSession(readAuthSession())
     navigate('/login')
   }
 
@@ -133,12 +113,7 @@ function BeforeYouBeginPage() {
             <PrimaryButton
               type="button"
               onClick={() => {
-                try {
-                  const session = JSON.parse(window.localStorage.getItem('mucm-auth-session') ?? '{}')
-                  markBeforeYouBeginSeen(session)
-                } catch {
-                  markBeforeYouBeginSeen({ email: userEmail })
-                }
+                markBeforeYouBeginSeen(readAuthSession())
                 navigate('/application')
               }}
             >
