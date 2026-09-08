@@ -805,9 +805,6 @@ function SubmittedApplicationsPage() {
                                     year: 'numeric',
                                   })}
                                 </p>
-                                <span className="mt-1.5 inline-flex items-center rounded-full bg-[#D4A843]/15 px-2 py-0.5 text-[10px] font-semibold text-[#7a5a14]">
-                                  Status changed: {submissionStatusLabelById.get(submission.id) || 'Submitted'}
-                                </span>
                               </div>
                               <div
                                 onClick={(e) => {
@@ -830,9 +827,14 @@ function SubmittedApplicationsPage() {
                 {selectedSubmission ? (
                   <article className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm lg:h-full">
                     <div className="border-b border-[#0A1628]/8 bg-[#F8F7F4] px-6 py-3 sm:px-8">
-                      <h3 className="text-lg text-[#0A1628] [font-family:'DM_Serif_Display',serif]">
-                        Submission {selectedSubmission.id}
-                      </h3>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-lg text-[#0A1628] [font-family:'DM_Serif_Display',serif]">
+                          Submission {selectedSubmission.id}
+                        </h3>
+                        <span className="inline-flex items-center rounded-full bg-[#D4A843]/15 px-2 py-0.5 text-[10px] font-semibold text-[#7a5a14]">
+                          Status changed: {submissionStatusLabelById.get(selectedSubmission.id) || 'Submitted'}
+                        </span>
+                      </div>
                     </div>
                     <div className="bg-[#F8F7F4] px-6 py-4 sm:px-8 lg:h-[calc(100%-2.9rem)] lg:overflow-y-auto">
                       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
